@@ -54,3 +54,9 @@ type VolumeHandleTargetPath struct {
 	VolumeHandle string `json:"volume_handle"` // ephemeral volume handle
 	TargetPath   string `json:"target_path"`   // target path of ephemeral volume
 }
+
+type MountOption struct {
+	UserSquashing string
+	NfsVersion    string
+	ReadOnly      bool
+}
