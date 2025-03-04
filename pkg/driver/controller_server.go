@@ -304,8 +304,8 @@ func (driver *Driver) createVolume(
 			filesystem = defaultFileSystem
 			log.Trace("Using default filesystem type: ", filesystem)
 		}
-		if driver.IsSupportedMultiNodeAccessMode(volumeCapabilities) && !driver.IsNFSResourceRequest(createParameters) {
-			return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("StorageClass parameter %s=%s is missing for creation of volumes with multi-node access", nfsResourcesKey, trueKey))
+		if driver.IsSupportedMultiNodeAccessMode(volumeCapabilities) && !(driver.IsNFSResourceRequest(createParameters) || driver.IsUnifiedFileRequest(createParameters)) {
+			return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("StorageClass parameter %s=%s is missing for creation of volumes with multi-node access for NFS or  StorageClass parameter %s=%s is missing for creation of volumes with multi-node access Unified File.", nfsResourcesKey, trueKey, accessProtocolKey, nfsFileSystem))
 		}
 	}
 
@@ -550,7 +550,7 @@ func (driver *Driver) createVolume(
 			}
 			log.Tracef("Found parent volume: %+v", existingParentVolume)
 
-			// CON-3010 If requested size for clone volume is less than parent volume size 
+			// CON-3010 If requested size for clone volume is less than parent volume size
 			// then report error
 			if size < existingParentVolume.Size {
 				return nil,
@@ -812,6 +812,14 @@ func (driver *Driver) controllerPublishVolume(
 		return map[string]string{
 			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
 			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
+		}, nil
+	}
+	if driver.IsUnifiedFileRequest(volumeContext) {
+		log.Info("ControllerPublish requested with unifile resources, returning success")
+		return map[string]string{
+			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
+			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
+			volumeAccessMode:   volumeAccessModeValueForUnifiedFile, //TODO verify if this is correct
 		}, nil
 	}
 
@@ -1551,46 +1559,6 @@ func (driver *Driver) ControllerExpandVolume(ctx context.Context, request *csi.C
 
 	// TODO: Add info to DB
 
-	//Handling NFS PVC request
-	if !strings.Contains(request.VolumeId, "pvc-") {
-		// Regular Nimble volumes will have the volume Id will be like this '06189263bcc823a018000000000000000000000087'
-		// But for NFS Nimble Volumes, the volume Id will be like this 634bdb9e-158a-4fb8-90fb-78eb1bad0bba
-		// This check is to prevent the processing of regular Nimble volumes
-		log.Tracef("Found a foreign UUID for the volume %s, check if it is Nimble Volume or not", request.VolumeId)
-		_, err := driver.GetVolumeByID(request.VolumeId, request.Secrets)
-		if err != nil {
-			log.Tracef("Failed to get volume with ID %s. Check whether it is NFS volume or not", request.VolumeId)
-			nfsVolumeID, err := driver.flavor.GetNFSVolumeID(request.VolumeId)
-			if err != nil {
-				return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to get the volume details for the foreign UUID %s: %s", request.VolumeId, err.Error()))
-			}
-			corrected_volumeId := "pvc-" + request.VolumeId
-			log.Infof("Found the RWO volume %s associated with the NFS volume %s", nfsVolumeID, corrected_volumeId)
-			if !strings.Contains(nfsVolumeID, "pvc-") {
-				log.Tracef("This backend RWO volume is a Nimble Volume, %s, lets find the appropriate pv name", nfsVolumeID)
-				existingVolume, err := driver.GetVolumeByID(nfsVolumeID, request.Secrets)
-				if err != nil {
-					log.Error("Failed to get Nimble volume with ID ", request.VolumeId)
-					return nil, err
-				}
-				log.Tracef("Found Nimble backend RWO Volume %s with ID %s", existingVolume.Name, existingVolume.ID)
-				nfsVolumeID = existingVolume.Name
-			}
-
-			err = driver.flavor.ExpandNFSBackendVolume(nfsVolumeID, request.CapacityRange.GetRequiredBytes())
-			if err != nil {
-				log.Errorf("Failed to update the backend RWO volume of NFS volume %s: %s", corrected_volumeId, err.Error())
-				return nil, err
-			}
-			log.Infof("The size of the backend RWO volume %s associated with the NFS volume %s has been updated", nfsVolumeID, corrected_volumeId)
-			//NFS client will take care of resizing
-			return &csi.ControllerExpandVolumeResponse{
-				CapacityBytes:         request.CapacityRange.GetRequiredBytes(),
-				NodeExpansionRequired: false,
-			}, nil
-		} // If this fails, then the request with foreign uid may belong to Nimlble.
-	}
-
 	// Get Volume
 	existingVolume, err := driver.GetVolumeByID(request.VolumeId, request.Secrets)
 	if err != nil {
@@ -1598,6 +1566,43 @@ func (driver *Driver) ControllerExpandVolume(ctx context.Context, request *csi.C
 		return nil, err
 	}
 	log.Tracef("Found Volume %s with ID %s", existingVolume.Name, existingVolume.ID)
+	//Handling NFS PVC request
+	if !strings.Contains(request.VolumeId, "pvc-") && err != nil {
+		// Regular Nimble volumes will have the volume Id will be like this '06189263bcc823a018000000000000000000000087'
+		// But for NFS Nimble Volumes, the volume Id will be like this 634bdb9e-158a-4fb8-90fb-78eb1bad0bba
+		// This check is to prevent the processing of regular Nimble volumes
+		log.Tracef("Found a foreign UUID for the volume %s, check if it is Nimble Volume or not", request.VolumeId)
+		log.Tracef("Failed to get volume with ID %s. Check whether it is NFS volume or not", request.VolumeId)
+		nfsVolumeID, err := driver.flavor.GetNFSVolumeID(request.VolumeId)
+		if err != nil {
+			return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to get the volume details for the foreign UUID %s: %s", request.VolumeId, err.Error()))
+		}
+		corrected_volumeId := "pvc-" + request.VolumeId
+		log.Infof("Found the RWO volume %s associated with the NFS volume %s", nfsVolumeID, corrected_volumeId)
+		if !strings.Contains(nfsVolumeID, "pvc-") {
+			log.Tracef("This backend RWO volume is a Nimble Volume, %s, lets find the appropriate pv name", nfsVolumeID)
+			existingVolume, err := driver.GetVolumeByID(nfsVolumeID, request.Secrets)
+			if err != nil {
+				log.Error("Failed to get Nimble volume with ID ", request.VolumeId)
+				return nil, err
+			}
+			log.Tracef("Found Nimble backend RWO Volume %s with ID %s", existingVolume.Name, existingVolume.ID)
+			nfsVolumeID = existingVolume.Name
+		}
+
+		err = driver.flavor.ExpandNFSBackendVolume(nfsVolumeID, request.CapacityRange.GetRequiredBytes())
+		if err != nil {
+			log.Errorf("Failed to update the backend RWO volume of NFS volume %s: %s", corrected_volumeId, err.Error())
+			return nil, err
+		}
+		log.Infof("The size of the backend RWO volume %s associated with the NFS volume %s has been updated", nfsVolumeID, corrected_volumeId)
+		//NFS client will take care of resizing
+		return &csi.ControllerExpandVolumeResponse{
+			CapacityBytes:         request.CapacityRange.GetRequiredBytes(),
+			NodeExpansionRequired: false,
+		}, nil
+		// If this fails, then the request with foreign uid may belong to Nimlble.
+	}
 
 	// Set node expansion required to 'true' for mount type as fs resize is always required in that case
 	nodeExpansionRequired := true
@@ -1609,6 +1614,11 @@ func (driver *Driver) ControllerExpandVolume(ctx context.Context, request *csi.C
 				nodeExpansionRequired = false
 			}
 		}
+	}
+
+	accessProtocol, ok := existingVolume.Config[accessProtocolKey]
+	if ok && accessProtocol == nfsFileSystem {
+		nodeExpansionRequired = false
 	}
 
 	if existingVolume.Size == request.CapacityRange.GetLimitBytes() || existingVolume.Size == request.CapacityRange.GetRequiredBytes() {
