@@ -222,6 +222,11 @@ func (driver *Driver) nodeStageVolume(
 		return nil
 	}
 
+	if driver.IsUnifiedFileRequest(volumeContext) {
+		log.Infof("NodeStageVolume requested with UnifiedFile resources, returning success")
+		return nil
+	}
+
 	// Stage the volume on the node by creating a new device with block or mount access.
 	// If already staged, then validate it and return appropriate response.
 	// Check if the volume has already been staged. If yes, then return here with success
@@ -872,6 +877,10 @@ func (driver *Driver) NodePublishVolume(ctx context.Context, request *csi.NodePu
 		return driver.flavor.HandleNFSNodePublish(request)
 	}
 
+	if driver.IsUnifiedFileRequest(request.VolumeContext) {
+		log.Infof("NodePublish requested with Unified File resources for %s", request.VolumeId)
+		return driver.flavor.HandleUnifiedFileNodePublish(request)
+	}
 	// If ephemeral volume request, then create new volume, add ACL and NodeStage/NodePublish
 	if ephemeral {
 		// Handle inline ephemeral volume request
