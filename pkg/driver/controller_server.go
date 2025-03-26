@@ -304,8 +304,8 @@ func (driver *Driver) createVolume(
 			filesystem = defaultFileSystem
 			log.Trace("Using default filesystem type: ", filesystem)
 		}
-		if driver.IsSupportedMultiNodeAccessMode(volumeCapabilities) && !driver.IsNFSResourceRequest(createParameters) {
-			return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("StorageClass parameter %s=%s is missing for creation of volumes with multi-node access", nfsResourcesKey, trueKey))
+		if driver.IsSupportedMultiNodeAccessMode(volumeCapabilities) && !(driver.IsNFSResourceRequest(createParameters) || driver.IsUnifiedFileRequest(createParameters)) {
+			return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("StorageClass parameter %s=%s is missing for creation of volumes with multi-node access for NFS or  StorageClass parameter %s=%s is missing for creation of volumes with multi-node access Unified File", nfsResourcesKey, trueKey, accessProtocolKey, nfsFileSystem))
 		}
 	}
 
@@ -812,6 +812,15 @@ func (driver *Driver) controllerPublishVolume(
 		return map[string]string{
 			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
 			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
+		}, nil
+	}
+
+	if driver.IsUnifiedFileRequest(volumeContext) {
+		log.Info("ControllerPublish requested with unifiedFile resources, returning success")
+		return map[string]string{
+			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
+			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
+			volumeAccessMode:   volumeAccessModeValueForUnifiedFile, //TODO verify if this is correct
 		}, nil
 	}
 

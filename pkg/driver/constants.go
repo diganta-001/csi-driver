@@ -129,4 +129,8 @@ const (
 	defaultCSITopologyKey = "csi.hpe.com/zone"
 	// FileSystem Corruption parameters
 	fsRepairKey = "fsRepair"
+
+	volumeAccessMode = "volumeAccessMode"
+
+	volumeAccessModeValueForUnifiedFile = "mount"
 )

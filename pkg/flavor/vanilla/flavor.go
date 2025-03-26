@@ -154,3 +154,8 @@ func (flavor *Flavor) CheckConnection() bool {
 func (flavor *Flavor) GetPVCByName(name string, namespace string) (*v1.PersistentVolumeClaim, error) {
 	return nil, nil
 }
+
+//nolint:revive
+func (flavor *Flavor) HandleUnifiedFileNodePublish(request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	return nil, status.Error(codes.Internal, "unifiedFile provisioned volume is not supported for non-k8s environments")
+}

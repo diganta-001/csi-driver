@@ -1,0 +1,61 @@
+// Copyright 2025 Hewlett Packard Enterprise Development LP
+package kubernetes
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	log "github.com/hpe-storage/common-host-libs/logger"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+const (
+	NFS                     = "nfs"
+	shareNfsVersion         = "shareNfsVersion"
+	unifiedFileHostIpKey    = "hostip"
+	unifiedFileMountPathKey = "mountpath"
+)
+
+func (flavor *Flavor) HandleUnifiedFileNodePublish(req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	log.Tracef(">>>>> HandleUnifiedFileNodePublish with volume %s target path %s", req.VolumeId, req.TargetPath)
+	defer log.Tracef("<<<<< HandleUnifiedFileNodePublish")
+	var mountOptions []string
+	var clusterIP, exportPath string
+	var existHostIp, existExportPath bool
+	clusterIP, existHostIp = req.VolumeContext[unifiedFileHostIpKey]
+	exportPath, existExportPath = req.VolumeContext[unifiedFileMountPathKey]
+	if !existHostIp || !existExportPath {
+		errStr := fmt.Sprintf("failed to create unifiedfile provisioned volume with hostip: %s, and mount path: %s, host ip or mount path should not be empty ", clusterIP, exportPath)
+		log.Errorf(errStr)
+		return nil, status.Error(codes.Internal, errStr)
+	}
+	source := fmt.Sprintf("%s:%s", clusterIP, exportPath)
+	target := req.GetTargetPath()
+	mountOptions = getNFSMountOptions(req.VolumeContext)
+	defaultShareNfsVersion := req.VolumeContext[shareNfsVersion]
+	if defaultShareNfsVersion == "" {
+		defaultShareNfsVersion = "4"
+	}
+	nfsComandArgs := fmt.Sprintf("%s%s", NFS, defaultShareNfsVersion)
+	if len(mountOptions) == 0 {
+		// use default mount options, i.e (rw,relatime,vers=4.0,rsize=1048576,wsize=1048576,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,local_lock=none)
+		mountOptions = []string{
+			"nolock",
+			"vers=4",
+		}
+	}
+	mountOptions = append(mountOptions, fmt.Sprintf("addr=%s", clusterIP))
+	if req.GetReadonly() {
+		mountOptions = append(mountOptions, "ro")
+	}
+	if err := os.MkdirAll(target, 0750); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	if err := flavor.chapiDriver.MountNFSVolume(source, target, mountOptions, nfsComandArgs); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &csi.NodePublishVolumeResponse{}, nil
+}
