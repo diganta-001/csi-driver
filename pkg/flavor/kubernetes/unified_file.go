@@ -14,8 +14,8 @@ import (
 const (
 	NFS                     = "nfs"
 	shareNfsVersion         = "shareNfsVersion"
-	unifiedFileHostIpKey    = "hostip"
-	unifiedFileMountPathKey = "mountpath"
+	unifiedFileHostIPKey    = "hostIP"
+	unifiedFileMountPathKey = "mountPath"
 )
 
 func (flavor *Flavor) HandleUnifiedFileNodePublish(req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
@@ -23,10 +23,10 @@ func (flavor *Flavor) HandleUnifiedFileNodePublish(req *csi.NodePublishVolumeReq
 	defer log.Tracef("<<<<< HandleUnifiedFileNodePublish")
 	var mountOptions []string
 	var clusterIP, exportPath string
-	var existHostIp, existExportPath bool
-	clusterIP, existHostIp = req.VolumeContext[unifiedFileHostIpKey]
+	var existHostIP, existExportPath bool
+	clusterIP, existHostIP = req.VolumeContext[unifiedFileHostIPKey]
 	exportPath, existExportPath = req.VolumeContext[unifiedFileMountPathKey]
-	if !existHostIp || !existExportPath {
+	if !existHostIP || !existExportPath {
 		errStr := fmt.Sprintf("failed to create unifiedfile provisioned volume with hostip: %s, and mount path: %s, host ip or mount path should not be empty ", clusterIP, exportPath)
 		log.Errorf(errStr)
 		return nil, status.Error(codes.Internal, errStr)
