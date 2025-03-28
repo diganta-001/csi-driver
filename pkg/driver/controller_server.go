@@ -820,7 +820,6 @@ func (driver *Driver) controllerPublishVolume(
 		return map[string]string{
 			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
 			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
-			volumeAccessMode:   volumeAccessModeValueForUnifiedFile, //TODO verify if this is correct
 		}, nil
 	}
 
