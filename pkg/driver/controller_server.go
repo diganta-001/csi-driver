@@ -304,8 +304,8 @@ func (driver *Driver) createVolume(
 			filesystem = defaultFileSystem
 			log.Trace("Using default filesystem type: ", filesystem)
 		}
-		if driver.IsSupportedMultiNodeAccessMode(volumeCapabilities) && !(driver.IsNFSResourceRequest(createParameters) || driver.IsUnifiedFileRequest(createParameters)) {
-			return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("StorageClass parameter %s=%s is missing for creation of volumes with multi-node access for NFS or  StorageClass parameter %s=%s is missing for creation of volumes with multi-node access Unified File", nfsResourcesKey, trueKey, accessProtocolKey, nfsFileSystem))
+		if driver.IsSupportedMultiNodeAccessMode(volumeCapabilities) && !(driver.IsNFSResourceRequest(createParameters) || driver.IsFileRequest(createParameters)) {
+			return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("StorageClass parameter %s=%s is missing for creation of volumes with multi-node access for NFS or  StorageClass parameter %s=%s is missing for creation of volumes with multi-node access File", nfsResourcesKey, trueKey, accessProtocolKey, nfsFileSystem))
 		}
 	}
 
@@ -815,8 +815,8 @@ func (driver *Driver) controllerPublishVolume(
 		}, nil
 	}
 
-	if driver.IsUnifiedFileRequest(volumeContext) {
-		log.Info("ControllerPublish requested with unifiedFile resources, returning success")
+	if driver.IsFileRequest(volumeContext) {
+		log.Info("ControllerPublish requested with file resources, returning success")
 		return map[string]string{
 			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
 			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
@@ -1038,6 +1038,11 @@ func (driver *Driver) controllerUnpublishVolume(volumeID string, nodeID string, 
 		}
 		log.Errorf("Failed to get volume %s, err: %s", volumeID, err.Error())
 		return err
+	}
+
+	if existingVolume.AccessProtocol == nfsFileSystem {
+		log.Info("ControllerUnpublish requested for File with multi-node access-mode, returning success")
+		return nil
 	}
 
 	// pass the nodeID to the container storage provider and do not do a look up of the node object as
@@ -1569,7 +1574,9 @@ func (driver *Driver) ControllerExpandVolume(ctx context.Context, request *csi.C
 		log.Error("Failed to get volume with ID ", request.VolumeId)
 		return nil, err
 	}
-	log.Tracef("Found Volume %s with ID %s", existingVolume.Name, existingVolume.ID)
+	if existingVolume != nil {
+		log.Tracef("Found Volume %s with ID %s", existingVolume.Name, existingVolume.ID)
+	}
 
 	//Handling NFS PVC request
 	if !strings.Contains(request.VolumeId, "pvc-") && err != nil {

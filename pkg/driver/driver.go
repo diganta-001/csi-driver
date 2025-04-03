@@ -832,7 +832,7 @@ func (driver *Driver) ScrubEphemeralPods(podsDirPath string) error {
 	return nil
 }
 
-func (driver *Driver) IsUnifiedFileRequest(parameters map[string]string) bool {
+func (driver *Driver) IsFileRequest(parameters map[string]string) bool {
 	accessProtocol, ok := parameters[accessProtocolKey]
 	return ok && accessProtocol == nfsFileSystem
 }
