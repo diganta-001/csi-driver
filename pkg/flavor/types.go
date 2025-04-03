@@ -45,5 +45,6 @@ type Flavor interface {
 	GetChapCredentials(volumeContext map[string]string) (*model.ChapInfo, error)
 	CheckConnection() bool
 	GetPVCByName(name string, namespace string) (*v1.PersistentVolumeClaim, error)
-	HandleUnifiedFileNodePublish(request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error)
+	HandleFileNodePublish(request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error)
+	GetRoute(hostIP string) (string, error)
 }

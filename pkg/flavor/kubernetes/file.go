@@ -12,22 +12,40 @@ import (
 )
 
 const (
-	NFS                     = "nfs"
-	shareNfsVersion         = "shareNfsVersion"
-	unifiedFileHostIPKey    = "hostIP"
-	unifiedFileMountPathKey = "mountPath"
+	NFS              = "nfs"
+	shareNfsVersion  = "shareNfsVersion"
+	fileHostIPKey    = "hostIP"
+	fileMountPathKey = "mountPath"
 )
 
-func (flavor *Flavor) HandleUnifiedFileNodePublish(req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	log.Tracef(">>>>> HandleUnifiedFileNodePublish with volume %s target path %s", req.VolumeId, req.TargetPath)
-	defer log.Tracef("<<<<< HandleUnifiedFileNodePublish")
+// HandleFileNodePublish handles the NodePublishVolume request for file-based volumes in a Kubernetes environment.
+// It ensures that the volume is properly mounted to the target path using NFS.
+//
+// Parameters:
+// - req: The NodePublishVolumeRequest containing volume details, target path, and context.
+//
+// Steps:
+// 1. Extracts the cluster IP and export path from the volume context.
+// 2. Validates that the cluster IP and export path are not empty.
+// 3. Constructs the NFS source and target path.
+// 4. Retrieves or sets default NFS mount options.
+// 5. Creates the target directory if it does not exist.
+// 6. Mounts the NFS volume to the target path.
+//
+// Returns:
+// - A NodePublishVolumeResponse on successful mount.
+// - An error if any step in the process fails.
+
+func (flavor *Flavor) HandleFileNodePublish(req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	log.Tracef(">>>>> HandleFileNodePublish with volume %s target path %s", req.VolumeId, req.TargetPath)
+	defer log.Tracef("<<<<< HandleFileNodePublish")
 	var mountOptions []string
 	var clusterIP, exportPath string
 	var existHostIP, existExportPath bool
-	clusterIP, existHostIP = req.VolumeContext[unifiedFileHostIPKey]
-	exportPath, existExportPath = req.VolumeContext[unifiedFileMountPathKey]
+	clusterIP, existHostIP = req.VolumeContext[fileHostIPKey]
+	exportPath, existExportPath = req.VolumeContext[fileMountPathKey]
 	if !existHostIP || !existExportPath {
-		errStr := fmt.Sprintf("failed to create unifiedfile provisioned volume with hostip: %s, and mount path: %s, host ip or mount path should not be empty ", clusterIP, exportPath)
+		errStr := fmt.Sprintf("failed to create file provisioned volume with hostip: %s, and mount path: %s, host ip or mount path should not be empty ", clusterIP, exportPath)
 		log.Errorf(errStr)
 		return nil, status.Error(codes.Internal, errStr)
 	}
