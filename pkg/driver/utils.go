@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -117,4 +118,28 @@ func removeDataFile(dirPath string, fileName string) error {
 	defer log.Trace("<<<<< removeDataFile")
 	filePath := path.Join(dirPath, fileName)
 	return util.FileDelete(filePath)
+}
+
+// getNodeIP extracts an IP address from the given input string.
+// It uses a regular expression to find an IP address that follows the keyword "src".
+//
+// Parameters:
+// - input: A string containing the text to search for an IP address.
+//
+// Returns:
+// - The extracted IP address as a string if found.
+// - An error if no valid IP address is found in the input.
+
+func getNodeIP(input string) (string, error) {
+	// Compile the regular expression to match an IP address after "src"
+	re := regexp.MustCompile(`\bsrc (\d+\.\d+\.\d+\.\d+)\b`)
+	match := re.FindStringSubmatch(input)
+
+	// Check if a match was found
+	if len(match) > 1 {
+		return match[1], nil // Return the matched IP address
+	}
+
+	// Return an error if no match is found
+	return "", fmt.Errorf("no valid IP address found in input: %s", input)
 }

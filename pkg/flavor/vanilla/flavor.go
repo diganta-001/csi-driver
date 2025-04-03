@@ -156,6 +156,11 @@ func (flavor *Flavor) GetPVCByName(name string, namespace string) (*v1.Persisten
 }
 
 //nolint:revive
-func (flavor *Flavor) HandleUnifiedFileNodePublish(request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	return nil, status.Error(codes.Internal, "unifiedFile provisioned volume is not supported for non-k8s environments")
+func (flavor *Flavor) HandleFileNodePublish(request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	return nil, status.Error(codes.Internal, "File provisioned volume is not supported for non-k8s environments")
+}
+
+//nolint:revive
+func (flavor *Flavor) GetRoute(hostIP string) (string, error) {
+	return "", status.Error(codes.Internal, "File provisioned volume is not supported for non-k8s environments")
 }

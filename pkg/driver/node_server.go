@@ -38,6 +38,15 @@ var (
 	ephemeralPublishLock   sync.Mutex
 	ephemeralUnpublishLock sync.Mutex
 )
+
+const (
+	fileHostIPKey    = "hostIP"
+	fileMountPathKey = "mountPath"
+	ID               = "id"
+	NodeIPKey        = "nodeIP"
+	NodeIPsKey       = "nodeIPs"
+)
+
 var isWatcherEnabled = false
 
 // Helper utility to construct default mountpoint path
@@ -222,8 +231,8 @@ func (driver *Driver) nodeStageVolume(
 		return nil
 	}
 
-	if driver.IsUnifiedFileRequest(volumeContext) {
-		log.Infof("NodeStageVolume requested with UnifiedFile resources, returning success")
+	if driver.IsFileRequest(volumeContext) {
+		log.Infof("NodeStageVolume requested with file resources, returning success")
 		return nil
 	}
 
@@ -877,9 +886,10 @@ func (driver *Driver) NodePublishVolume(ctx context.Context, request *csi.NodePu
 		return driver.flavor.HandleNFSNodePublish(request)
 	}
 
-	if driver.IsUnifiedFileRequest(request.VolumeContext) {
-		log.Infof("NodePublish requested with Unified File resources for %s", request.VolumeId)
-		return driver.flavor.HandleUnifiedFileNodePublish(request)
+	// Check if volume is requested with File resources and intercept here
+	if driver.IsFileRequest(request.VolumeContext) {
+		log.Infof("NodePublish requested with file resources for %s", request.VolumeId)
+		return driver.handleFileNodePublish(request)
 	}
 	// If ephemeral volume request, then create new volume, add ACL and NodeStage/NodePublish
 	if ephemeral {
@@ -2322,4 +2332,151 @@ func loadVolumeData(dir string, fileName string) (map[string]string, error) {
 	}
 	log.Tracef("Data file [%s] loaded successfully", dataFilePath)
 	return data, nil
+}
+
+// handleFileNodePublish handles the NodePublishVolume request for file-based volumes.
+// It ensures that the volume is published to the node by performing the following steps:
+// 1. Retrieves the storage provider using the provided secrets.
+// 2. Prepares the file publish context, including node-specific details like NodeIP.
+// 3. Checks if the volume is already published to the node by verifying the NodeIP in the volume configuration.
+// 4. Publishes the file volume if it is not already published.
+// 5. Updates the VolumeContext with the host IP if available.
+// 6. Delegates further handling to the flavor-specific implementation for file-based volumes.
+//
+// Parameters:
+// - request: The NodePublishVolumeRequest containing volume details and context.
+//
+// Returns:
+// - A NodePublishVolumeResponse on success.
+// - An error if any step in the process fails.
+func (driver *Driver) handleFileNodePublish(request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	log.Infof("NodePublish requested with file resources for %s", request.VolumeId)
+
+	storageProvider, err := driver.GetStorageProvider(request.Secrets)
+	if err != nil {
+		log.Errorf("Failed to get storage provider, err: %s", err.Error())
+		return nil, status.Error(codes.Unavailable, fmt.Sprintf("Failed to get storage provider, err: %s", err.Error()))
+	}
+
+	// Prepare file publish context
+	filePublishContext, err := driver.prepareFilePublishContext(request)
+	if err != nil {
+		return nil, err
+	}
+
+	existingVolume, err := driver.GetVolumeByID(request.VolumeId, request.Secrets)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get volume %s, err: %s", request.VolumeId, err.Error())
+	}
+	isNodeIPExist := false
+	if existingVolume != nil {
+		// check if the volume is already published to this node IP
+		isNodeIPExist = driver.isIPInNodeIPs(existingVolume, filePublishContext)
+	}
+
+	// Publish the file volume if it is not already published
+	if !isNodeIPExist {
+		if _, err := storageProvider.PublishFileVolume(request.VolumeId, filePublishContext); err != nil {
+			log.Errorf("Failed to publish file volume %s, err: %s", request.VolumeId, err.Error())
+			return nil, err
+		}
+	} else {
+		log.Infof("node is already added to file share  %s ", request.VolumeId)
+	}
+
+	// Update VolumeContext with host IP if available
+	if err := driver.updateVolumeContextWithHostIP(request, existingVolume); err != nil {
+		log.Errorf("Failed to update VolumeContext with host IP: %s", err.Error())
+		return nil, err
+	}
+
+	return driver.flavor.HandleFileNodePublish(request)
+}
+
+// Helper to prepare file publish context
+func (driver *Driver) prepareFilePublishContext(request *csi.NodePublishVolumeRequest) (map[string]interface{}, error) {
+	hostIP, _ := request.VolumeContext[fileHostIPKey]
+	ens, err := driver.flavor.GetRoute(hostIP)
+	if err != nil {
+		log.Errorf("Failed to get route information, err: %s", err.Error())
+		return nil, status.Error(codes.Unavailable, fmt.Sprintf("Failed to get route information, err: %s", err.Error()))
+	}
+	// add volume context, node IP and volumeID to file publish context , map size is adjusted based on the number of volume context, nodeIP and volumeID
+	filePublishContext := make(map[string]interface{}, len(request.VolumeContext)+2)
+	for k, v := range request.VolumeContext {
+		filePublishContext[k] = v
+	}
+	filePublishContext[ID] = request.VolumeId
+
+	nodeIP, err := getNodeIP(ens)
+	if err == nil {
+		filePublishContext[NodeIPKey] = nodeIP
+	} else {
+		log.Errorf("Failed to get node IP, err: %s", err.Error())
+		return nil, status.Error(codes.Unavailable, fmt.Sprintf("Failed to get node IP, err: %s", err.Error()))
+
+	}
+
+	return filePublishContext, nil
+}
+
+// Helper to update VolumeContext with host IP
+func (driver *Driver) updateVolumeContextWithHostIP(request *csi.NodePublishVolumeRequest, existingVolume *model.Volume) error {
+	if existingVolume != nil {
+		if hostIP, ok := existingVolume.Config[fileHostIPKey].(string); ok {
+			request.VolumeContext[fileHostIPKey] = hostIP
+		} else {
+			log.Errorf("failed to get hostIP for volume %s", request.VolumeId)
+			return fmt.Errorf("failed to get hostIP for volume %s", request.VolumeId)
+		}
+	}
+	return nil
+}
+
+// isIPInNodeIPs checks if the given NodeIP exists in the list of node IPs configured for the volume.
+// It retrieves the NodeIP from the provided filePublishContext and compares it against the node IPs
+// stored in the volume's configuration.
+//
+// Parameters:
+// - existingVolume: The volume object containing configuration details, including the list of node IPs.
+// - filePublishContext: A map containing the NodeIP to be checked.
+//
+// Returns:
+// - true if the NodeIP exists in the list of node IPs for the volume.
+// - false if the NodeIP does not exist or if there are any issues with the input data.
+func (driver *Driver) isIPInNodeIPs(existingVolume *model.Volume, filePublishContext map[string]interface{}) bool {
+	nodeIps := existingVolume.Config[NodeIPsKey]
+	if nodeIps == nil {
+		log.Infof("No host IPs found in the volume configuration for key: %s", fileHostIPKey)
+		return false
+	}
+
+	// Check if NodeIPKey exists in filePublishContext and is a string
+	nodeIP, ok := filePublishContext[NodeIPKey].(string)
+	if !ok {
+		log.Infof("NodeIPKey is missing or not a string in filePublishContext")
+		return false
+	}
+
+	// Check if nodeIps is a string
+	nodeIpsStr, ok := nodeIps.(string)
+	if !ok {
+		log.Errorf("Failed to cast nodeIps to string for key: %s", fileHostIPKey)
+		return false
+	}
+
+	// Split the string into a comma-separated array
+	nodeIpsArray := strings.Split(nodeIpsStr, ",")
+	log.Infof("Parsed host IPs: %v", nodeIpsArray)
+
+	// Check if the provided IP exists in the array
+	for _, existingIP := range nodeIpsArray {
+		if strings.TrimSpace(existingIP) == nodeIP {
+			log.Infof("Found IP %s in the node IPs array", nodeIP)
+			return true
+		}
+	}
+
+	log.Infof("IP %s not found in the node IPs array", nodeIP)
+	return false
 }
