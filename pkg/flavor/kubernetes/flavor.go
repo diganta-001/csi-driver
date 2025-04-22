@@ -1067,9 +1067,3 @@ func (flavor *Flavor) GetChapCredentials(volumeContext map[string]string) (*mode
 	// Return nil if no CHAP credentials are found.
 	return nil, nil
 }
-
-func (flavor *Flavor) GetRoute(hostIP string) (string, error) {
-	log.Tracef(">>>>> GetRoute for hostIP: %s", hostIP)
-	defer log.Trace("<<<<< GetRoute")
-	return flavor.chapiDriver.GetRoute(hostIP)
-}
