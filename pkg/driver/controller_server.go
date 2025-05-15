@@ -816,7 +816,6 @@ func (driver *Driver) controllerPublishVolume(
 	}
 
 	if driver.IsFileRequest(volumeContext) {
-		log.Info("ControllerPublish requested with file resources, returning success")
 		// Get storageProvider using secrets
 		storageProvider, err := driver.GetStorageProvider(secrets)
 		if err != nil {
@@ -830,6 +829,7 @@ func (driver *Driver) controllerPublishVolume(
 			return nil, status.Error(codes.Internal,
 				fmt.Sprintf("Failed to add file share settings access for volume %s for node %s via File CSP, err: %s", volumeID, nodeID, err.Error()))
 		}
+		log.Info("ControllerPublish requested with file resources, returning success")
 		return map[string]string{
 			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
 			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
