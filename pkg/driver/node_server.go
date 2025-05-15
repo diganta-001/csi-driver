@@ -39,14 +39,6 @@ var (
 	ephemeralUnpublishLock sync.Mutex
 )
 
-const (
-	fileHostIPKey    = "hostIP"
-	fileMountPathKey = "mountPath"
-	ID               = "id"
-	NodeIPKey        = "nodeIP"
-	NodeIPsKey       = "nodeIPs"
-)
-
 var isWatcherEnabled = false
 
 // Helper utility to construct default mountpoint path
