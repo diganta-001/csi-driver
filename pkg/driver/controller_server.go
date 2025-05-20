@@ -309,6 +309,10 @@ func (driver *Driver) createVolume(
 		}
 	}
 
+	if volAccessType == model.BlockType && driver.IsFileRequest(createParameters) {
+		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("volume mode can't be block for File"))
+	}
+
 	// Verify if NFS based provisioning is requested
 	if driver.IsNFSResourceRequest(createParameters) {
 		// check if block access type is requested with multi-node mode
