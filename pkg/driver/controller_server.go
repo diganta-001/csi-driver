@@ -440,6 +440,10 @@ func (driver *Driver) createVolume(
 		// Check if the existing volume's size matches with the requested size
 		// TODO: Nimble doesn't support capacity range, but other SP might.
 		// We may consider adding range support in the future???
+		if existingVolume.Size == 0 {
+			log.Warnf("Volume %s with ID %s has size 0 reported from CSP, treating it as size %d", existingVolume.Name, existingVolume.ID, size)
+			existingVolume.Size = size
+		}
 		if existingVolume.Size != size {
 			log.Errorf("Volume already exists with size %v but different size %v being requested.",
 				existingVolume.Size, size)
@@ -453,7 +457,7 @@ func (driver *Driver) createVolume(
 			log.Errorf("Background operation for volume %s is not complete: %s", existingVolume.Name, err.Error())
 			return nil, status.Error(codes.Unavailable, fmt.Sprintf("Background operation for volume is not complete: %s", err.Error()))
 		}
-		// applicable only if the existing volume is in the background operation state
+		// Applicable only if the existing volume has completed its background operation successfully
 		if isbackgroudOperationDone {
 			updateVolumeContext(respVolContext, existingVolume)
 			log.Tracef("Returning the volume '%s' with size %d after successful completion of background operation", existingVolume.Name, existingVolume.Size)
@@ -730,9 +734,8 @@ func (driver *Driver) deleteVolume(volumeID string, secrets map[string]string, f
 	// check if snapshots exist
 	if len(snapshots) > 0 {
 		log.Tracef("Found snapshots for volume %s: %+v", volumeID, snapshots)
-		return status.Errorf(codes.FailedPrecondition, "Volume %s with ID %s cannot be deleted as it has snapshots attached", existingVolume.Name, existingVolume.ID)
+		return status.Error(codes.FailedPrecondition, fmt.Sprintf("Volume %s with ID %s cannot be deleted as it has snapshots attached", existingVolume.Name, existingVolume.ID))
 	}
-
 	// Delete the volume from the array
 	log.Infof("About to delete volume %s with force=%v", volumeID, force)
 	if err := storageProvider.DeleteVolume(volumeID, force); err != nil {
@@ -740,7 +743,6 @@ func (driver *Driver) deleteVolume(volumeID string, secrets map[string]string, f
 		return status.Error(codes.Internal,
 			fmt.Sprintf("Error while deleting volume %s, err: %s", existingVolume.Name, err.Error()))
 	}
-
 	// Delete DB entry
 	if err := driver.RemoveFromDB(existingVolume.Name); err != nil {
 		return err
@@ -864,23 +866,37 @@ func (driver *Driver) controllerPublishVolume(
 	}
 
 	if driver.IsFileRequest(volumeContext) {
-		// Get storageProvider using secrets
+		accessControlList := volumeContext[accessControlListKey]
+		if accessControlList == "" {
+			accessControlList = defaultAccessControl
+		}
+
+		publishOptions := &model.PublishFileOptions{
+			Name:              volumeContext[fileVolumeNameKey],
+			AccessProtocol:    volumeContext[accessProtocolKey],
+			AccessControlList: accessControlList,
+		}
+
 		storageProvider, err := driver.GetStorageProvider(secrets)
 		if err != nil {
 			log.Error("err: ", err.Error())
 			return nil, status.Error(codes.Unavailable,
 				fmt.Sprintf("Failed to get storage provider from secrets, err: %s", err.Error()))
 		}
-		_, err = storageProvider.PublishVolume(volumeID, nodeID, volumeContext[accessProtocolKey])
+
+		publishFileVol, err := storageProvider.PublishFileVolume(volumeID, publishOptions)
 		if err != nil {
 			log.Errorf("Failed to publish volume %s, err: %s", volumeID, err.Error())
 			return nil, status.Error(codes.Internal,
 				fmt.Sprintf("Failed to add file share settings access for volume %s for node %s via File CSP, err: %s", volumeID, nodeID, err.Error()))
 		}
+
 		log.Info("ControllerPublish requested with file resources, returning success")
 		return map[string]string{
 			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
 			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
+			fileExportIPKey:    publishFileVol.ExportIP,
+			mountPathKey:       publishFileVol.MountPath,
 		}, nil
 	}
 
@@ -1110,6 +1126,7 @@ func (driver *Driver) controllerUnpublishVolume(volumeID string, nodeID string, 
 		return err
 	}
 
+	// this condition is for unified file csp
 	if existingVolume.AccessProtocol == nfsFileSystem {
 		log.Info("ControllerUnpublish requested for File with multi-node access-mode, returning success")
 		return nil
