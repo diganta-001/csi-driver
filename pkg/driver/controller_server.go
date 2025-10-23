@@ -847,6 +847,46 @@ func (driver *Driver) controllerPublishVolume(
 	}
 
 	if driver.IsFileRequest(volumeContext) {
+		hostIP, mountPath, accessIP := "", "", "" //needed to mount the file volume on the node
+
+		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+
+			hostIP = volumeContext[fileHostIPKey] // IP provided in volume context by HomeFleet NFS CSP SC
+			accessIP = "*"                        // TODO: HomeFleet NFS CSP currently providing access to all
+		} else if secrets != nil && secrets[serviceNameKey] == alletraStorageNFSCSPServiceName {
+			existingVolume, err := driver.GetVolumeByID(volumeID, secrets)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get volume %s, err: %s", volumeID, err.Error())
+			}
+			configValues, err := ValidateFileVolumeConfig(existingVolume, volumeID, fileHostIPKey, mountPathKey)
+			if err != nil {
+				log.Error("File volume config validation failed: ", err.Error())
+				return nil, err
+			}
+
+			hostIP = configValues[fileHostIPKey]
+			mountPath = configValues[mountPathKey]
+			// Logic below gets access IP from node networks and can become common for all NFS CSPs TODO
+			node, err := driver.flavor.GetNodeInfo(nodeID)
+			if err != nil {
+				log.Error("Failed to get node info: ", err.Error())
+				return nil, err
+			}
+			accessIP, err = getNetworkInterfaceIP(hostIP, node.Networks)
+			if err != nil {
+				log.Error("Failed to get access IP: ", err.Error())
+				return nil, err
+			}
+			log.Infof("Resolved access IP %s for volume %s on node %s", accessIP, volumeID, nodeID)
+		}
+
+		publishOptions := &model.PublishFileOptions{
+			Name:           volumeContext[fileVolumeNameKey],
+			HostUUID:       nodeID,
+			AccessProtocol: volumeContext[accessProtocolKey],
+			AccessIP:       accessIP,
+			VolumeID:       volumeID,
+		}
 		// Get storageProvider using secrets
 		storageProvider, err := driver.GetStorageProvider(secrets)
 		if err != nil {
@@ -854,16 +894,21 @@ func (driver *Driver) controllerPublishVolume(
 			return nil, status.Error(codes.Unavailable,
 				fmt.Sprintf("Failed to get storage provider from secrets, err: %s", err.Error()))
 		}
-		_, err = storageProvider.PublishVolume(volumeID, nodeID, volumeContext[accessProtocolKey])
+		publishFileVol, err := storageProvider.PublishFileVolume(publishOptions)
 		if err != nil {
 			log.Errorf("Failed to publish volume %s, err: %s", volumeID, err.Error())
 			return nil, status.Error(codes.Internal,
 				fmt.Sprintf("Failed to add file share settings access for volume %s for node %s via File CSP, err: %s", volumeID, nodeID, err.Error()))
 		}
+		if publishFileVol != nil && publishFileVol.MountPath != "" && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+			mountPath = "/" // TODO need to assign this , currently / mount is working publishFileVol.MountPath
+		}
 		log.Info("ControllerPublish requested with file resources, returning success")
 		return map[string]string{
 			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
 			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
+			fileHostIPKey:      hostIP,
+			mountPathKey:       mountPath,
 		}, nil
 	}
 

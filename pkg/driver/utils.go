@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc"
 
 	log "github.com/hpe-storage/common-host-libs/logger"
+	"github.com/hpe-storage/common-host-libs/model"
 	"github.com/hpe-storage/common-host-libs/util"
 )
 
@@ -125,4 +126,83 @@ func removeDataFile(dirPath string, fileName string) error {
 // otherwise it returns false.
 func isValidIP(ip string) bool {
 	return ip != "" && net.ParseIP(ip) != nil
+}
+
+func getNetworkInterfaceIP(targetIP string, interfaceCIDRs []*string) (string, error) {
+	log.Tracef(">>>>> GetNetworkInterfaceIP with targetIP: %s, interfaceCIDRs: %v", targetIP, interfaceCIDRs)
+	defer log.Trace("<<<<< GetNetworkInterfaceIP")
+
+	if targetIP == "" {
+		return "", fmt.Errorf("target IP address cannot be empty")
+	}
+
+	if len(interfaceCIDRs) == 0 {
+		return "", fmt.Errorf("interface CIDR list cannot be empty")
+	}
+
+	ip := net.ParseIP(targetIP)
+	if ip == nil {
+		return "", fmt.Errorf("invalid target IP address format: %s", targetIP)
+	}
+
+	var parseErrors []string
+	for _, cidr := range interfaceCIDRs {
+		if cidr == nil || *cidr == "" {
+			continue // Skip empty CIDR entries
+		}
+
+		// Parse the CIDR to get both the interface IP and the network
+		interfaceIP, ipnet, err := net.ParseCIDR(*cidr)
+		if err != nil {
+			parseErrors = append(parseErrors, fmt.Sprintf("invalid CIDR format '%s': %v", *cidr, err))
+			continue
+		}
+
+		if ipnet.Contains(ip) {
+			// Return the interface IP (the IP part from the CIDR) as IPv4
+			ipAddr := interfaceIP.To4()
+			if ipAddr != nil {
+				log.Tracef("Found matching interface IP %s for target %s in CIDR %s", ipAddr.String(), targetIP, *cidr)
+				return ipAddr.String(), nil
+			}
+		}
+	}
+
+	// If we had parse errors, include them in the final error message
+	if len(parseErrors) > 0 {
+		return "", fmt.Errorf("no matching network interface found for target IP %s. Parse errors encountered: %v", targetIP, parseErrors)
+	}
+
+	return "", fmt.Errorf("no matching network interface found for target IP %s in provided CIDR ranges: %v", targetIP, interfaceCIDRs)
+}
+
+// ValidateFileVolumeConfig validates required configuration keys for file volumes
+// and returns a map of validated string values. Performs special validation for hostIP.
+func ValidateFileVolumeConfig(volume *model.Volume, volumeID string, requiredKeys ...string) (map[string]string, error) {
+	if volume.Config == nil {
+		return nil, fmt.Errorf("config is nil for volume %s", volumeID)
+	}
+
+	configValues := make(map[string]string)
+
+	for _, key := range requiredKeys {
+		value, ok := volume.Config[key]
+		if !ok || value == nil {
+			return nil, fmt.Errorf("%s key not found or value is nil in config for volume %s", key, volumeID)
+		}
+
+		stringValue, ok := value.(string)
+		if !ok || stringValue == "" {
+			return nil, fmt.Errorf("failed to get %s for volume %s", key, volumeID)
+		}
+
+		// Special validation for hostIP key
+		if key == fileHostIPKey && !isValidIP(stringValue) {
+			return nil, fmt.Errorf("invalid hostIP value for volume %s: %s", volumeID, stringValue)
+		}
+
+		configValues[key] = stringValue
+	}
+
+	return configValues, nil
 }
