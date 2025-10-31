@@ -97,7 +97,7 @@ const (
 	hostEncryptionPassphraseKey      = "hostEncryptionPassphrase"
 
 	//PVC attributes propogated to the CSI
-	pvcNameAttribute = "csi.storage.k8s.io/pvc/name"
+	pvcNameAttribute      = "csi.storage.k8s.io/pvc/name"
 	pvcNamespaceAttribute = "csi.storage.k8s.io/pvc/namespace"
 
 	// POD attributes propogated to the CSI
@@ -135,6 +135,6 @@ const (
 	mountPathKey                    = "mountPath"
 	serviceNameKey                  = "serviceName"
 	homeFleetNFSCSPServiceName      = "alletrastoragemp-x10000-nfs-csp-svc"
-	alletraStorageNFSCSPServiceName = "alletrastoragemp-x10000-nfs-csp-svc"
-	fileVolumeNameKey			   = "csi.storage.k8s.io/pv/name"
+	alletraStorageNFSCSPServiceName = "alletrastoragemp-b10000-nfs-csp-svc"
+	fileVolumeNameKey               = "csi.storage.k8s.io/pv/name"
 )
