@@ -1087,3 +1087,16 @@ func (flavor *Flavor) GetChapCredentials(volumeContext map[string]string) (*mode
 	// Return nil if no CHAP credentials are found.
 	return nil, nil
 }
+
+// UpdatePersistentVolume updates a PersistentVolume in Kubernetes
+func (flavor *Flavor) UpdatePersistentVolume(pv *v1.PersistentVolume) error {
+	log.Tracef(">>>>> UpdatePersistentVolume with PV %s", pv.Name)
+	defer log.Tracef("<<<<< UpdatePersistentVolume")
+
+	_, err := flavor.kubeClient.CoreV1().PersistentVolumes().Update(context.Background(), pv, meta_v1.UpdateOptions{})
+	if err != nil {
+		log.Errorf("Failed to update PV %s: %s", pv.Name, err.Error())
+		return err
+	}
+	return nil
+}
