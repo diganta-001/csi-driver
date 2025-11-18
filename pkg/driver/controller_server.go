@@ -18,6 +18,7 @@ import (
 	"github.com/hpe-storage/common-host-libs/model"
 	"github.com/hpe-storage/common-host-libs/storageprovider"
 	"github.com/hpe-storage/common-host-libs/util"
+	"github.com/hpe-storage/csi-driver/pkg/flavor/kubernetes"
 )
 
 // Retrieves volume access type: 'block' or 'filesystem'
@@ -704,24 +705,30 @@ func (driver *Driver) deleteVolume(volumeID string, secrets map[string]string, f
 	}
 
 	// Get volume snapshots
-	snapshots, err := storageProvider.GetSnapshots(volumeID)
-	if err != nil {
-		log.Error("Error fetching snapshots for volume:", volumeID, ", error: ", err.Error())
-		return status.Error(codes.FailedPrecondition, fmt.Sprintf("Error while attempting to get snapshots for volume %s: %s", volumeID, err.Error()))
-	}
+	if IsSnapshotSupportedByCSP(secrets[serviceNameKey]) {
+		snapshots, err := storageProvider.GetSnapshots(volumeID)
+		if err != nil {
+			log.Error("Error fetching snapshots for volume:", volumeID, ", error: ", err.Error())
+			return status.Error(codes.FailedPrecondition, fmt.Sprintf("Error while attempting to get snapshots for volume %s: %s", volumeID, err.Error()))
+		}
 
-	// check if snapshots exist
-	if len(snapshots) > 0 {
-		log.Tracef("Found snapshots for volume %s: %+v", volumeID, snapshots)
-		return status.Errorf(codes.FailedPrecondition, fmt.Sprintf("Volume %s with ID %s cannot be deleted as it has snapshots attached", existingVolume.Name, existingVolume.ID))
+		// check if snapshots exist
+		if len(snapshots) > 0 {
+			log.Tracef("Found snapshots for volume %s: %+v", volumeID, snapshots)
+			return status.Errorf(codes.FailedPrecondition, fmt.Sprintf("Volume %s with ID %s cannot be deleted as it has snapshots attached", existingVolume.Name, existingVolume.ID))
+		}
 	}
-
 	// Delete the volume from the array
 	log.Infof("About to delete volume %s with force=%v", volumeID, force)
 	if err := storageProvider.DeleteVolume(volumeID, force); err != nil {
 		log.Error("err: ", err.Error())
 		return status.Error(codes.Internal,
 			fmt.Sprintf("Error while deleting volume %s, err: %s", existingVolume.Name, err.Error()))
+	}
+
+	// Cleanup volume-specific mutex for file volumes to prevent memory leaks
+	if existingVolume.AccessProtocol == nfsFileSystem {
+		driver.pvMutexManager.CleanupVolumeMutex(volumeID)
 	}
 
 	// Delete DB entry
@@ -866,12 +873,18 @@ func (driver *Driver) controllerPublishVolume(
 
 			hostIP = configValues[fileHostIPKey]
 			mountPath = configValues[mountPathKey]
-			// Logic below gets access IP from node networks and can become common for all NFS CSPs TODO
+		}
+		// Logic below gets access IP from node networks and can become common for all NFS CSPs TODO
+		if volumeContext[accessIPKey] != "" {
+			accessIP = volumeContext[accessIPKey]
+			log.Infof("Using access IP %s from volume context for volume %s on node %s", accessIP, volumeID, nodeID)
+		} else {
 			node, err := driver.flavor.GetNodeInfo(nodeID)
 			if err != nil {
 				log.Error("Failed to get node info: ", err.Error())
 				return nil, err
 			}
+
 			accessIP, err = getNetworkInterfaceIP(hostIP, node.Networks)
 			if err != nil {
 				log.Error("Failed to get access IP: ", err.Error())
@@ -903,6 +916,10 @@ func (driver *Driver) controllerPublishVolume(
 		if publishFileVol != nil && publishFileVol.MountPath != "" && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
 			mountPath = "/" // TODO need to assign this , currently / mount is working publishFileVol.MountPath
 		}
+
+		// Update PV with nodeID → accessIP mapping
+		driver.updatePVWithNodeIDMapping(volumeID, nodeID, accessIP)
+
 		log.Info("ControllerPublish requested with file resources, returning success")
 		return map[string]string{
 			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
@@ -1130,6 +1147,27 @@ func (driver *Driver) controllerUnpublishVolume(volumeID string, nodeID string, 
 	}
 
 	if existingVolume.AccessProtocol == nfsFileSystem {
+		// Remove PV nodeID mapping and unpublish file volume
+		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+			// Get accessIP from PV before removing the mapping
+			accessIP, err := driver.getAccessIPFromPV(volumeID, nodeID)
+			if err != nil {
+				log.Errorf("Failed to get accessIP from PV for volume %s and node %s: %s", volumeID, nodeID, err.Error())
+			} else if accessIP != "" {
+				// Unpublish file volume with the accessIP
+				unPublishOptions := &model.UnPublishFileOptions{
+					VolumeID: volumeID,
+					AccessIP: accessIP,
+					Name:     existingVolume.Name,
+				}
+				_, err = storageProvider.UnPublishFileVolume(unPublishOptions)
+				if err != nil {
+					log.Errorf("Failed to unpublish file volume %s with accessIP %s: %s", volumeID, accessIP, err.Error())
+				}
+			}
+			// Remove the PV annotation mapping
+			driver.removePVNodeIDMapping(volumeID, nodeID)
+		}
 		log.Info("ControllerUnpublish requested for File with multi-node access-mode, returning success")
 		return nil
 	}
@@ -1881,4 +1919,118 @@ func checkBackgroundOperationStatus(volume *model.Volume) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// updatePVWithNodeIDMapping updates the PersistentVolume with nodeID → accessIP mapping.
+// This method uses a volume-specific mutex lock to prevent race conditions when multiple nodes
+// attempt to publish the same RWX volume concurrently. The lock is held until the PV update completes.
+//
+// Parameters:
+//   - volumeID: The ID of the volume/PV to update
+//   - nodeID: The node ID to use as the key in volumeAttributes
+//   - accessIP: The access IP address to use as the value in volumeAttributes
+func (driver *Driver) updatePVWithNodeIDMapping(volumeID, nodeID, accessIP string) {
+	log.Tracef(">>>>> updatePVWithNodeIDMapping, volumeID: %s, nodeID: %s, accessIP: %s", volumeID, nodeID, accessIP)
+	defer log.Trace("<<<<< updatePVWithNodeIDMapping")
+
+	// Get volume-specific mutex to prevent race conditions for this volume
+	volumeMutex := driver.pvMutexManager.GetVolumeMutex(volumeID)
+	volumeMutex.Lock()
+	defer volumeMutex.Unlock()
+
+	pv, err := driver.flavor.GetVolumeById(volumeID)
+	if err != nil {
+		log.Warnf("Failed to get PV %s for updating nodeID mapping, err: %s", volumeID, err.Error())
+		return
+	}
+
+	if pv == nil {
+		log.Warnf("PV %s is nil, skipping nodeID mapping update", volumeID)
+		return
+	}
+
+	// Add nodeID → accessIP to PV annotations (annotations are mutable, unlike spec fields)
+	if pv.ObjectMeta.Annotations == nil {
+		pv.ObjectMeta.Annotations = make(map[string]string)
+	}
+	annotationKey := fmt.Sprintf("csi.hpe.com/node-%s-accessip", nodeID)
+	pv.ObjectMeta.Annotations[annotationKey] = accessIP
+
+	// Persist the PV update to Kubernetes (mutex held during update)
+	if k8sFlavor, ok := driver.flavor.(*kubernetes.Flavor); ok {
+		if err := k8sFlavor.UpdatePersistentVolume(pv); err != nil {
+			log.Warnf("Failed to update PV %s with nodeID mapping, err: %s", volumeID, err.Error())
+		} else {
+			log.Infof("Successfully updated PV %s with nodeID %s → accessIP %s mapping", volumeID, nodeID, accessIP)
+		}
+	}
+}
+
+// removePVNodeIDMapping removes the nodeID → accessIP mapping annotation from the PersistentVolume.
+// This method retrieves the accessIP from the PV annotation and then removes the annotation
+// to clean up the metadata after a volume is unpublished from a node.
+//
+// Parameters:
+//   - volumeID: The ID of the volume/PV to update
+//   - nodeID: The node ID whose mapping should be removed
+func (driver *Driver) removePVNodeIDMapping(volumeID, nodeID string) {
+	log.Tracef(">>>>> removePVNodeIDMapping, volumeID: %s, nodeID: %s", volumeID, nodeID)
+	defer log.Trace("<<<<< removePVNodeIDMapping")
+
+	pv, err := driver.flavor.GetVolumeById(volumeID)
+	if err != nil {
+		log.Warnf("Failed to get PV %s for retrieving nodeID accessIP, err: %s", volumeID, err.Error())
+		return
+	}
+
+	if pv == nil {
+		log.Warnf("PV %s is nil, skipping nodeID mapping removal", volumeID)
+		return
+	}
+
+	// Get the accessIP for this nodeID from PV annotations
+	annotationKey := fmt.Sprintf("csi.hpe.com/node-%s-accessip", nodeID)
+	if pv.ObjectMeta.Annotations != nil {
+		if accessIP, ok := pv.ObjectMeta.Annotations[annotationKey]; ok {
+			log.Infof("Retrieved accessIP %s for nodeID %s from PV %s", accessIP, nodeID, volumeID)
+			// TODO: Use the accessIP to remove file share access for this specific node
+
+			// Remove the annotation after unpublishing
+			delete(pv.ObjectMeta.Annotations, annotationKey)
+
+			// Update PV to remove the nodeID mapping annotation
+			if k8sFlavor, ok := driver.flavor.(*kubernetes.Flavor); ok {
+				if err := k8sFlavor.UpdatePersistentVolume(pv); err != nil {
+					log.Warnf("Failed to remove nodeID annotation from PV %s, err: %s", volumeID, err.Error())
+				} else {
+					log.Infof("Successfully removed nodeID %s annotation from PV %s", nodeID, volumeID)
+				}
+			}
+		} else {
+			log.Warnf("No accessIP annotation found for nodeID %s in PV %s", nodeID, volumeID)
+		}
+	}
+}
+
+// getAccessIPFromPV retrieves the accessIP for a given nodeID from PV annotations
+func (driver *Driver) getAccessIPFromPV(volumeID, nodeID string) (string, error) {
+	pv, err := driver.flavor.GetVolumeById(volumeID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get PV %s: %s", volumeID, err.Error())
+	}
+
+	if pv == nil {
+		return "", fmt.Errorf("PV %s is nil", volumeID)
+	}
+
+	// Get the accessIP for this nodeID from PV annotations
+	annotationKey := fmt.Sprintf("csi.hpe.com/node-%s-accessip", nodeID)
+	if pv.ObjectMeta.Annotations != nil {
+		if accessIP, ok := pv.ObjectMeta.Annotations[annotationKey]; ok {
+			log.Infof("Retrieved accessIP %s for nodeID %s from PV %s", accessIP, nodeID, volumeID)
+			return accessIP, nil
+		}
+	}
+
+	return "", fmt.Errorf("no accessIP annotation found for nodeID %s in PV %s", nodeID, volumeID)
 }

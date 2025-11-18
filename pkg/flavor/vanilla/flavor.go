@@ -163,3 +163,10 @@ func (flavor *Flavor) GetPVCByName(name string, namespace string) (*v1.Persisten
 func (flavor *Flavor) HandleFileNodePublish(request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	return nil, status.Error(codes.Internal, "File provisioned volume is not supported for non-k8s environments")
 }
+
+// UpdatePersistentVolume is not supported in vanilla flavor
+//
+//nolint:revive
+func (flavor *Flavor) UpdatePersistentVolume(pv *v1.PersistentVolume) error {
+	return fmt.Errorf("UpdatePersistentVolume is not supported for non-k8s environments")
+}

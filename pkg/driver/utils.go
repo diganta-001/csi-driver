@@ -206,3 +206,14 @@ func ValidateFileVolumeConfig(volume *model.Volume, volumeID string, requiredKey
 
 	return configValues, nil
 }
+
+// IsSnapshotSupportedByCSP checks if the given CSP service supports snapshot operations.
+// Returns true if snapshots are supported, false otherwise.
+func IsSnapshotSupportedByCSP(serviceName string) bool {
+	// If serviceName is empty, assume snapshot support (default behavior)
+	if serviceName == "" {
+		return true
+	}
+	// Check if CSP is in the unsupported list
+	return !snapshotUnsupportedCSPs[serviceName]
+}
