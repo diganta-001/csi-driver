@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -174,6 +176,115 @@ func getNetworkInterfaceIP(targetIP string, interfaceCIDRs []*string) (string, e
 	}
 
 	return "", fmt.Errorf("no matching network interface found for target IP %s in provided CIDR ranges: %v", targetIP, interfaceCIDRs)
+}
+
+// getAllNodeInterfaceIPs extracts all IP addresses from the node's network interface CIDRs
+// and returns them as a comma-separated string. This is used as a fallback when direct
+// network matching fails (e.g., for routed/indirect networks).
+func getAllNodeInterfaceIPs(interfaceCIDRs []*string) (string, error) {
+	log.Tracef(">>>>> getAllNodeInterfaceIPs with interfaceCIDRs: %v", interfaceCIDRs)
+	defer log.Trace("<<<<< getAllNodeInterfaceIPs")
+
+	if len(interfaceCIDRs) == 0 {
+		return "", fmt.Errorf("interface CIDR list cannot be empty")
+	}
+
+	var ips []string
+	var parseErrors []string
+
+	for _, cidr := range interfaceCIDRs {
+		if cidr == nil || *cidr == "" {
+			continue // Skip empty CIDR entries
+		}
+
+		// Parse the CIDR to extract the IP address
+		interfaceIP, _, err := net.ParseCIDR(*cidr)
+		if err != nil {
+			parseErrors = append(parseErrors, fmt.Sprintf("invalid CIDR format '%s': %v", *cidr, err))
+			continue
+		}
+
+		// Convert to IPv4 if possible
+		ipAddr := interfaceIP.To4()
+		if ipAddr != nil {
+			ips = append(ips, ipAddr.String())
+		}
+	}
+
+	if len(ips) == 0 {
+		if len(parseErrors) > 0 {
+			return "", fmt.Errorf("no valid IP addresses found. Parse errors: %v", parseErrors)
+		}
+		return "", fmt.Errorf("no valid IP addresses found in provided CIDR ranges")
+	}
+
+	result := strings.Join(ips, ",")
+	log.Tracef("Extracted IPs from node interfaces: %s", result)
+	return result, nil
+}
+
+// generateRandomIPFromRange parses an IP range string in the format "10.132.230.12#24"
+// and generates a random IP address within that range.
+// The format means: starting from the base IP, there are 'range' number of consecutive IPs available.
+// For example, "10.132.230.12#24" means IPs from 10.132.230.12 to 10.132.230.35 (24 IPs total).
+func generateRandomIPFromRange(ipRangeStr string) (string, error) {
+	log.Tracef(">>>>> generateRandomIPFromRange with ipRangeStr: %s", ipRangeStr)
+	defer log.Trace("<<<<< generateRandomIPFromRange")
+
+	if ipRangeStr == "" {
+		return "", fmt.Errorf("IP range string cannot be empty")
+	}
+
+	// Format expected: "10.132.230.12#24" where 24 is the count of available IPs
+	parts := strings.Split(ipRangeStr, "#")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid IP range format (expected 'IP#number'): %s", ipRangeStr)
+	}
+
+	baseIP := parts[0]
+	rangeStr := parts[1]
+
+	// Parse the range number (count of available IPs)
+	rangeCount, err := strconv.Atoi(rangeStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse IP range count from '%s': %v", ipRangeStr, err)
+	}
+
+	if rangeCount <= 0 {
+		return "", fmt.Errorf("IP range count must be positive: %d", rangeCount)
+	}
+
+	// Parse the base IP
+	ipParts := strings.Split(baseIP, ".")
+	if len(ipParts) != 4 {
+		return "", fmt.Errorf("invalid IP format in range string: %s", baseIP)
+	}
+
+	// Extract IP prefix (first 3 octets) and the starting suffix (last octet)
+	ipPrefix := strings.Join(ipParts[:3], ".")
+	startSuffix, err := strconv.Atoi(ipParts[3])
+	if err != nil {
+		return "", fmt.Errorf("invalid last octet in base IP '%s': %v", baseIP, err)
+	}
+
+	// Generate random offset from 0 to (rangeCount - 1)
+	randomOffset := rand.Intn(rangeCount)
+
+	// Calculate the final IP suffix
+	finalSuffix := startSuffix + randomOffset
+
+	// Validate that we don't exceed 255 (max value for IP octet)
+	if finalSuffix > 255 {
+		return "", fmt.Errorf("calculated IP suffix %d exceeds maximum value 255 (base: %s, range: %d)",
+			finalSuffix, baseIP, rangeCount)
+	}
+
+	// Create the generated IP
+	generatedIP := fmt.Sprintf("%s.%d", ipPrefix, finalSuffix)
+	log.Infof("Generated random IP %s from range %s (offset: %d from base %s)",
+		generatedIP, ipRangeStr, randomOffset, baseIP)
+
+	return generatedIP, nil
 }
 
 // ValidateFileVolumeConfig validates required configuration keys for file volumes

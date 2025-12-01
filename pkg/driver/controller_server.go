@@ -441,7 +441,7 @@ func (driver *Driver) createVolume(
 		// Check if the existing volume's size matches with the requested size
 		// TODO: Nimble doesn't support capacity range, but other SP might.
 		// We may consider adding range support in the future???
-		if existingVolume.Size != size {
+		if existingVolume.Size != size && (secrets != nil && secrets[serviceNameKey] != homeFleetNFSCSPServiceName) {
 			log.Errorf("Volume already exists with size %v but different size %v being requested.",
 				existingVolume.Size, size)
 			return nil, status.Error(
@@ -454,7 +454,11 @@ func (driver *Driver) createVolume(
 			log.Errorf("Background operation for volume %s is not complete: %s", existingVolume.Name, err.Error())
 			return nil, status.Error(codes.Aborted, fmt.Sprintf("Background operation for volume is not complete: %s", err.Error()))
 		}
-		// applicable only if the existing volume is in the background operation state
+		// For HomeFleet NFS CSP, update the size of existing volume to requested size as HomeFleet doesn't return the volume size
+		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+			existingVolume.Size = size
+		}
+		// Applicable only if the existing volume has completed its background operation successfully
 		if isbackgroudOperationDone {
 			updateVolumeContext(respVolContext, existingVolume)
 			log.Tracef("Returning the volume '%s' with size %d after successful completion of background operation", existingVolume.Name, existingVolume.Size)
@@ -577,7 +581,7 @@ func (driver *Driver) createVolume(
 			}
 			log.Tracef("Found parent volume: %+v", existingParentVolume)
 
-			// CON-3010 If requested size for clone volume is less than parent volume size 
+			// CON-3010 If requested size for clone volume is less than parent volume size
 			// then report error
 			if size < existingParentVolume.Size {
 				return nil,
@@ -856,11 +860,21 @@ func (driver *Driver) controllerPublishVolume(
 	if driver.IsFileRequest(volumeContext) {
 		hostIP, mountPath, accessIP := "", "", "" //needed to mount the file volume on the node
 
-		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+		if secrets != nil && secrets[serviceNameKey] == alletraStorageNFSCSPServiceName {
+			// Get storageProvider using secrets
+			storageProvider, err := driver.GetStorageProvider(secrets)
+			if err != nil {
+				log.Error("err: ", err.Error())
+				return nil, status.Error(codes.Unavailable,
+					fmt.Sprintf("Failed to get storage provider from secrets, err: %s", err.Error()))
+			}
+			_, err = storageProvider.PublishVolume(volumeID, nodeID, volumeContext[accessProtocolKey])
+			if err != nil {
+				log.Errorf("Failed to publish volume %s, err: %s", volumeID, err.Error())
+				return nil, status.Error(codes.Internal,
+					fmt.Sprintf("Failed to add file share settings access for volume %s for node %s via File CSP, err: %s", volumeID, nodeID, err.Error()))
+			}
 
-			hostIP = volumeContext[fileHostIPKey] // IP provided in volume context by HomeFleet NFS CSP SC
-			accessIP = "*"                        // TODO: HomeFleet NFS CSP currently providing access to all
-		} else if secrets != nil && secrets[serviceNameKey] == alletraStorageNFSCSPServiceName {
 			existingVolume, err := driver.GetVolumeByID(volumeID, secrets)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get volume %s, err: %s", volumeID, err.Error())
@@ -873,48 +887,76 @@ func (driver *Driver) controllerPublishVolume(
 
 			hostIP = configValues[fileHostIPKey]
 			mountPath = configValues[mountPathKey]
-		}
-		// Logic below gets access IP from node networks and can become common for all NFS CSPs TODO
-		if volumeContext[accessIPKey] != "" {
-			accessIP = volumeContext[accessIPKey]
-			log.Infof("Using access IP %s from volume context for volume %s on node %s", accessIP, volumeID, nodeID)
-		} else {
-			node, err := driver.flavor.GetNodeInfo(nodeID)
+		} else if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+
+			// Logic below gets access IP from node networks and can become common for all NFS CSPs TODO
+			if volumeContext[accessIPKey] != "" {
+				accessIP = volumeContext[accessIPKey]
+				log.Infof("Using access IP %s from volume context for volume %s on node %s", accessIP, volumeID, nodeID)
+			} else {
+				node, err := driver.flavor.GetNodeInfo(nodeID)
+				if err != nil {
+					log.Error("Failed to get node info: ", err.Error())
+					return nil, err
+				}
+
+				accessIP, err = getNetworkInterfaceIP(hostIP, node.Networks)
+				if err != nil {
+					// Fallback: use comma-separated list of all node IPs for routed networks
+					log.Warnf("Direct network matching failed for hostIP %s: %s. Using all node IPs as fallback.", hostIP, err.Error())
+					accessIP, err = getAllNodeInterfaceIPs(node.Networks)
+					if err != nil {
+						log.Errorf("Failed to get node interface IPs: %s", err.Error())
+						return nil, fmt.Errorf("failed to determine access IP for volume %s on node %s: %s", volumeID, nodeID, err.Error())
+					}
+					log.Infof("Using comma-separated IPs %s for routed network access to volume %s on node %s", accessIP, volumeID, nodeID)
+				} else {
+					log.Infof("Resolved access IP %s for volume %s on node %s", accessIP, volumeID, nodeID)
+				}
+			}
+			publishOptions := &model.PublishFileOptions{
+				Name:           volumeContext[fileVolumeNameKey],
+				HostUUID:       nodeID,
+				AccessProtocol: volumeContext[accessProtocolKey],
+				AccessIP:       accessIP,
+				VolumeID:       volumeID,
+			}
+			// Get storageProvider using secrets
+			storageProvider, err := driver.GetStorageProvider(secrets)
 			if err != nil {
-				log.Error("Failed to get node info: ", err.Error())
-				return nil, err
+				log.Error("err: ", err.Error())
+				return nil, status.Error(codes.Unavailable,
+					fmt.Sprintf("Failed to get storage provider from secrets, err: %s", err.Error()))
+			}
+			publishFileVol, err := storageProvider.PublishFileVolume(publishOptions)
+			if err != nil {
+				log.Errorf("Failed to publish volume %s, err: %s", volumeID, err.Error())
+				return nil, status.Error(codes.Internal,
+					fmt.Sprintf("Failed to add file share settings access for volume %s for node %s via File CSP, err: %s", volumeID, nodeID, err.Error()))
 			}
 
-			accessIP, err = getNetworkInterfaceIP(hostIP, node.Networks)
-			if err != nil {
-				log.Error("Failed to get access IP: ", err.Error())
-				return nil, err
-			}
-			log.Infof("Resolved access IP %s for volume %s on node %s", accessIP, volumeID, nodeID)
-		}
+			mountPath = publishFileVol.MountPath
+			if volumeContext[fileHostIPKey] != "" {
+				hostIP = volumeContext[fileHostIPKey]
+			} else {
+				clusters, err := storageProvider.GetStorageClusters()
+				if err != nil {
+					log.Warnf("Failed to get storage clusters: %s", err.Error())
+				} else if clusters != nil {
+					log.Tracef("Retrieved storage cluster information: %+v", clusters)
+				}
 
-		publishOptions := &model.PublishFileOptions{
-			Name:           volumeContext[fileVolumeNameKey],
-			HostUUID:       nodeID,
-			AccessProtocol: volumeContext[accessProtocolKey],
-			AccessIP:       accessIP,
-			VolumeID:       volumeID,
-		}
-		// Get storageProvider using secrets
-		storageProvider, err := driver.GetStorageProvider(secrets)
-		if err != nil {
-			log.Error("err: ", err.Error())
-			return nil, status.Error(codes.Unavailable,
-				fmt.Sprintf("Failed to get storage provider from secrets, err: %s", err.Error()))
-		}
-		publishFileVol, err := storageProvider.PublishFileVolume(publishOptions)
-		if err != nil {
-			log.Errorf("Failed to publish volume %s, err: %s", volumeID, err.Error())
-			return nil, status.Error(codes.Internal,
-				fmt.Sprintf("Failed to add file share settings access for volume %s for node %s via File CSP, err: %s", volumeID, nodeID, err.Error()))
-		}
-		if publishFileVol != nil && publishFileVol.MountPath != "" && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
-			mountPath = "/" // TODO need to assign this , currently / mount is working publishFileVol.MountPath
+				// Generate random IP from the NFS server IP range
+				if clusters != nil && clusters.NfsServerIPRange != "" {
+					generatedIP, err := generateRandomIPFromRange(clusters.NfsServerIPRange)
+					if err != nil {
+						log.Warnf("Failed to generate IP from range: %s", err.Error())
+					} else {
+						hostIP = generatedIP
+					}
+				}
+			}
+
 		}
 
 		// Update PV with nodeID → accessIP mapping
@@ -972,21 +1014,21 @@ func (driver *Driver) controllerPublishVolume(
 	existingNode, err := storageProvider.GetNodeContext(node.UUID)
 	if err != nil {
 		log.Errorf("Error retrieving the node info from the CSP. err: %s", err.Error())
-		return nil, status.Error(codes.Unavailable, 
-		fmt.Sprintf("Error retrieving the node info for ID %s from the CSP, err: %s", node.UUID, err.Error()))
+		return nil, status.Error(codes.Unavailable,
+			fmt.Sprintf("Error retrieving the node info for ID %s from the CSP, err: %s", node.UUID, err.Error()))
 	}
 
 	// Configure access protocol defaulting to iSCSI when unspecified
-        var requestedAccessProtocol = volumeContext[accessProtocolKey]
-        if requestedAccessProtocol == "" {
-                // by default when no protocol specified make iscsi as default
-                requestedAccessProtocol = iscsi
-                log.Tracef("Defaulting to access protocol %s", requestedAccessProtocol)
-        } else if requestedAccessProtocol == "iscsi" {
-                requestedAccessProtocol = iscsi
-        } else if requestedAccessProtocol == "fc" {
-                requestedAccessProtocol = fc
-        }
+	var requestedAccessProtocol = volumeContext[accessProtocolKey]
+	if requestedAccessProtocol == "" {
+		// by default when no protocol specified make iscsi as default
+		requestedAccessProtocol = iscsi
+		log.Tracef("Defaulting to access protocol %s", requestedAccessProtocol)
+	} else if requestedAccessProtocol == "iscsi" {
+		requestedAccessProtocol = iscsi
+	} else if requestedAccessProtocol == "fc" {
+		requestedAccessProtocol = fc
+	}
 
 	if existingNode != nil {
 		log.Tracef("CSP has already been notified about the node with ID %s and UUID %s", existingNode.ID, existingNode.UUID)
@@ -1146,7 +1188,7 @@ func (driver *Driver) controllerUnpublishVolume(volumeID string, nodeID string, 
 		return err
 	}
 
-	if existingVolume.AccessProtocol == nfsFileSystem {
+	if existingVolume.AccessProtocol == nfsFileSystem || (secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName) {
 		// Remove PV nodeID mapping and unpublish file volume
 		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
 			// Get accessIP from PV before removing the mapping
