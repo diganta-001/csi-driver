@@ -138,6 +138,7 @@ const (
 	homeFleetNFSCSPServiceName      = "alletrastoragemp-x10000-nfs-csp-svc"
 	alletraStorageNFSCSPServiceName = "alletrastoragemp-b10000-nfs-csp-svc"
 	fileVolumeNameKey               = "csi.storage.k8s.io/pv/name"
+	hostIPAnnotationKey             = "csi.hpe.com/hostIP"
 )
 
 // snapshotUnsupportedCSPs contains CSP service names that do not support snapshot operations

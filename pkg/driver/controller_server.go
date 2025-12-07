@@ -731,7 +731,7 @@ func (driver *Driver) deleteVolume(volumeID string, secrets map[string]string, f
 	}
 
 	// Cleanup volume-specific mutex for file volumes to prevent memory leaks
-	if existingVolume.AccessProtocol == nfsFileSystem {
+	if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
 		driver.pvMutexManager.CleanupVolumeMutex(volumeID)
 	}
 
@@ -939,28 +939,15 @@ func (driver *Driver) controllerPublishVolume(
 			if volumeContext[fileHostIPKey] != "" {
 				hostIP = volumeContext[fileHostIPKey]
 			} else {
-				clusters, err := storageProvider.GetStorageClusters()
-				if err != nil {
-					log.Warnf("Failed to get storage clusters: %s", err.Error())
-				} else if clusters != nil {
-					log.Tracef("Retrieved storage cluster information: %+v", clusters)
-				}
-
-				// Generate random IP from the NFS server IP range
-				if clusters != nil && clusters.NfsServerIPRange != "" {
-					generatedIP, err := generateRandomIPFromRange(clusters.NfsServerIPRange)
-					if err != nil {
-						log.Warnf("Failed to generate IP from range: %s", err.Error())
-					} else {
-						hostIP = generatedIP
-					}
+				hostIP = driver.getOrGenerateHostIP(volumeID, storageProvider)
+				if hostIP == "" {
+					return nil, status.Error(codes.Internal,
+						"Failed to retrieve NFS server IP. Please try again after some time. If the issue persists, update the StorageClass with hostIP and retry.")
 				}
 			}
-
+			// Update PV with nodeID → accessIP mapping
+			driver.updatePVWithNodeIDMapping(volumeID, nodeID, accessIP)
 		}
-
-		// Update PV with nodeID → accessIP mapping
-		driver.updatePVWithNodeIDMapping(volumeID, nodeID, accessIP)
 
 		log.Info("ControllerPublish requested with file resources, returning success")
 		return map[string]string{
@@ -1188,7 +1175,13 @@ func (driver *Driver) controllerUnpublishVolume(volumeID string, nodeID string, 
 		return err
 	}
 
-	if existingVolume.AccessProtocol == nfsFileSystem || (secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName) {
+	// this condition is for unified file csp
+	if existingVolume.AccessProtocol == nfsFileSystem {
+		log.Info("ControllerUnpublish requested for File with multi-node access-mode, returning success")
+		return nil
+	}
+	// this condition is for homefleet nfs csp
+	if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
 		// Remove PV nodeID mapping and unpublish file volume
 		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
 			// Get accessIP from PV before removing the mapping
@@ -2056,6 +2049,11 @@ func (driver *Driver) removePVNodeIDMapping(volumeID, nodeID string) {
 
 // getAccessIPFromPV retrieves the accessIP for a given nodeID from PV annotations
 func (driver *Driver) getAccessIPFromPV(volumeID, nodeID string) (string, error) {
+	// Get volume-specific mutex to prevent race conditions when reading PV
+	volumeMutex := driver.pvMutexManager.GetVolumeMutex(volumeID)
+	volumeMutex.Lock()
+	defer volumeMutex.Unlock()
+
 	pv, err := driver.flavor.GetVolumeById(volumeID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get PV %s: %s", volumeID, err.Error())
@@ -2075,4 +2073,135 @@ func (driver *Driver) getAccessIPFromPV(volumeID, nodeID string) (string, error)
 	}
 
 	return "", fmt.Errorf("no accessIP annotation found for nodeID %s in PV %s", nodeID, volumeID)
+}
+
+// updatePVWithHostIP updates the PersistentVolume with hostIP annotation.
+// This stores the generated hostIP in PV annotations so it can be reused across pod restarts.
+//
+// Parameters:
+//   - volumeID: The ID of the volume/PV to update
+//   - hostIP: The host IP address to store in PV annotations
+func (driver *Driver) updatePVWithHostIP(volumeID, hostIP string) {
+	log.Tracef(">>>>> updatePVWithHostIP, volumeID: %s, hostIP: %s", volumeID, hostIP)
+	defer log.Trace("<<<<< updatePVWithHostIP")
+
+	// Get volume-specific mutex to prevent race conditions for this volume
+	volumeMutex := driver.pvMutexManager.GetVolumeMutex(volumeID)
+	volumeMutex.Lock()
+	defer volumeMutex.Unlock()
+
+	pv, err := driver.flavor.GetVolumeById(volumeID)
+	if err != nil {
+		log.Warnf("Failed to get PV %s for updating hostIP, err: %s", volumeID, err.Error())
+		return
+	}
+
+	if pv == nil {
+		log.Warnf("PV %s is nil, skipping hostIP update", volumeID)
+		return
+	}
+
+	// Add hostIP to PV annotations
+	if pv.ObjectMeta.Annotations == nil {
+		pv.ObjectMeta.Annotations = make(map[string]string)
+	}
+	pv.ObjectMeta.Annotations[hostIPAnnotationKey] = hostIP
+
+	// Persist the PV update to Kubernetes
+	if k8sFlavor, ok := driver.flavor.(*kubernetes.Flavor); ok {
+		if err := k8sFlavor.UpdatePersistentVolume(pv); err != nil {
+			log.Warnf("Failed to update PV %s with hostIP, err: %s", volumeID, err.Error())
+		} else {
+			log.Infof("Successfully updated PV %s with hostIP %s", volumeID, hostIP)
+		}
+	}
+}
+
+// getHostIPFromPV retrieves the hostIP from PV annotations
+//
+// Parameters:
+//   - volumeID: The ID of the volume/PV to query
+//
+// Returns:
+//   - string: The hostIP if found, empty string otherwise
+//   - error: Error if PV retrieval fails
+func (driver *Driver) getHostIPFromPV(volumeID string) (string, error) {
+	log.Tracef(">>>>> getHostIPFromPV, volumeID: %s", volumeID)
+	defer log.Trace("<<<<< getHostIPFromPV")
+
+	// Get volume-specific mutex to prevent race conditions when reading PV
+	volumeMutex := driver.pvMutexManager.GetVolumeMutex(volumeID)
+	volumeMutex.Lock()
+	defer volumeMutex.Unlock()
+
+	pv, err := driver.flavor.GetVolumeById(volumeID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get PV %s: %s", volumeID, err.Error())
+	}
+
+	if pv == nil {
+		return "", fmt.Errorf("PV %s is nil", volumeID)
+	}
+
+	// Get the hostIP from PV annotations
+	if pv.ObjectMeta.Annotations != nil {
+		if hostIP, ok := pv.ObjectMeta.Annotations[hostIPAnnotationKey]; ok {
+			log.Infof("Retrieved hostIP %s from PV %s annotations", hostIP, volumeID)
+			return hostIP, nil
+		}
+	}
+
+	log.Tracef("No hostIP annotation found in PV %s", volumeID)
+	return "", nil
+}
+
+// getOrGenerateHostIP retrieves existing hostIP from PV annotations or generates a new one.
+// If a hostIP exists in PV annotations, it returns that value.
+// Otherwise, it generates a new random IP from the NFS server IP range and stores it in PV annotations.
+//
+// Parameters:
+//   - volumeID: The ID of the volume/PV to query or update
+//   - storageProvider: The storage provider to get cluster information from
+//
+// Returns:
+//   - string: The hostIP (existing or newly generated)
+func (driver *Driver) getOrGenerateHostIP(volumeID string, storageProvider storageprovider.StorageProvider) string {
+	log.Tracef(">>>>> getOrGenerateHostIP, volumeID: %s", volumeID)
+	defer log.Trace("<<<<< getOrGenerateHostIP")
+
+	var hostIP string
+
+	// Check if hostIP already exists in PV annotations
+	existingHostIP, err := driver.getHostIPFromPV(volumeID)
+	if err != nil {
+		log.Warnf("Failed to get hostIP from PV annotations: %s", err.Error())
+	}
+
+	if existingHostIP != "" {
+		// Use existing hostIP from PV annotations
+		hostIP = existingHostIP
+		log.Infof("Using existing hostIP %s from PV annotations for volume %s", hostIP, volumeID)
+	} else {
+		// Generate new hostIP and add to PV annotations
+		clusters, err := storageProvider.GetStorageClusters()
+		if err != nil {
+			log.Warnf("Failed to get storage clusters: %s", err.Error())
+		} else if clusters != nil {
+			log.Tracef("Retrieved storage cluster information: %+v", clusters)
+		}
+
+		// Generate random IP from the NFS server IP range
+		if clusters != nil && clusters.NfsServerIPRange != "" {
+			generatedIP, err := generateRandomIPFromRange(clusters.NfsServerIPRange)
+			if err != nil {
+				log.Warnf("Failed to generate IP from range: %s", err.Error())
+			} else {
+				hostIP = generatedIP
+				// Add hostIP to PV annotations
+				driver.updatePVWithHostIP(volumeID, hostIP)
+			}
+		}
+	}
+
+	return hostIP
 }
