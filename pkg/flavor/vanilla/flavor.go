@@ -164,6 +164,20 @@ func (flavor *Flavor) HandleFileNodePublish(request *csi.NodePublishVolumeReques
 	return nil, status.Error(codes.Internal, "File provisioned volume is not supported for non-k8s environments")
 }
 
+// CheckCloneJobStatus is not supported in vanilla flavor
+//
+//nolint:revive
+func (flavor *Flavor) CheckCloneJobStatus(sourcePVCName, destPVCName, namespace string) (bool, string, error) {
+	return false, "", fmt.Errorf("CheckCloneJobStatus is not supported for non-k8s environments")
+}
+
+// DeleteCloneJob is not supported in vanilla flavor
+//
+//nolint:revive
+func (flavor *Flavor) DeleteCloneJob(sourcePVCName, destPVCName, namespace string) error {
+	return fmt.Errorf("DeleteCloneJob is not supported for non-k8s environments")
+}
+
 // UpdatePersistentVolume is not supported in vanilla flavor
 //
 //nolint:revive

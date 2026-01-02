@@ -457,6 +457,22 @@ func (driver *Driver) createVolume(
 		// For HomeFleet NFS CSP, update the size of existing volume to requested size as HomeFleet doesn't return the volume size
 		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
 			existingVolume.Size = size
+
+			// Check if this is a clone operation and verify job status
+			if volumeContentSource != nil && volumeContentSource.GetVolume() != nil {
+				sourceVolumeID := volumeContentSource.GetVolume().VolumeId
+				// Extract PVC namespace from createParameters
+				pvcNamespace := createParameters[nfsSourceNamespaceKey]
+				if pvcNamespace == "" {
+					pvcNamespace = defaultNFSNamespace
+				}
+
+				// Validate clone job status - returns error if not succeeded
+				if err := driver.validateCloneJobStatus(sourceVolumeID, name, pvcNamespace); err != nil {
+					return nil, err
+				}
+
+			}
 		}
 		// Applicable only if the existing volume has completed its background operation successfully
 		if isbackgroudOperationDone {
@@ -591,6 +607,10 @@ func (driver *Driver) createVolume(
 
 			// Create a clone from another volume
 			log.Infof("About to create a new clone '%s' of size %v from volume %s with options %+v", name, size, existingParentVolume.ID, createOptions)
+			if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+				// namespace is required for HomeFleet NFS CSP clone operation
+				createOptions[namespaceKey] = createParameters[nfsSourceNamespaceKey]
+			}
 			volume, err := storageProvider.CloneVolume(name, description, existingParentVolume.ID, "", size, createOptions)
 			if err != nil {
 				log.Tracef("Clone creation failed, err: %s", err.Error())
@@ -2204,4 +2224,66 @@ func (driver *Driver) getOrGenerateHostIP(volumeID string, storageProvider stora
 	}
 
 	return hostIP
+}
+
+// validateCloneJobStatus checks the status of a clone job and returns an error if the job has not succeeded.
+// This method is used to ensure that clone operations have completed successfully before proceeding with volume operations.
+//
+// Parameters:
+//   - sourceVolumeID: The source volume ID being cloned
+//   - destVolumeName: The destination volume name
+//   - namespace: The Kubernetes namespace where the clone job runs
+//
+// Returns:
+//   - error: Returns an error if the job is still running, has failed, or doesn't exist. Returns nil only if job succeeded.
+func (driver *Driver) validateCloneJobStatus(sourceVolumeID, destVolumeName, namespace string) error {
+	log.Tracef(">>>>> validateCloneJobStatus, sourceVolumeID: %s, destVolumeName: %s, namespace: %s",
+		sourceVolumeID, destVolumeName, namespace)
+	defer log.Trace("<<<<< validateCloneJobStatus")
+
+	jobExists, jobStatus, err := driver.flavor.CheckCloneJobStatus(sourceVolumeID, destVolumeName, namespace)
+	if err != nil {
+		log.Errorf("Failed to check clone job status: %s", err.Error())
+		return status.Error(codes.Internal,
+			fmt.Sprintf("Failed to check clone job status for volume %s: %s", destVolumeName, err.Error()))
+	}
+
+	if !jobExists {
+		log.Warnf("Clone job does not exist for volume %s", destVolumeName)
+		return status.Error(codes.NotFound,
+			fmt.Sprintf("Clone job not found for volume %s", destVolumeName))
+	}
+
+	// Handle different job statuses - only "Succeeded" is acceptable
+	switch jobStatus {
+	case "Succeeded":
+		log.Infof("Clone job completed successfully for volume %s", destVolumeName)
+
+		// Clean up the completed clone job
+		log.Infof("Cleaning up clone job for volume %s", destVolumeName)
+		if err := driver.flavor.DeleteCloneJob(sourceVolumeID, destVolumeName, namespace); err != nil {
+			log.Warnf("Failed to delete clone job for volume %s: %s (continuing anyway)", destVolumeName, err.Error())
+			// Don't fail the operation if cleanup fails - the volume is ready
+		} else {
+			log.Infof("Successfully cleaned up clone job for volume %s", destVolumeName)
+		}
+
+		return nil
+	case "Running":
+		log.Warnf("Clone job is still running for volume %s", destVolumeName)
+		return status.Error(codes.Unavailable,
+			fmt.Sprintf("Clone operation is still in progress for volume %s", destVolumeName))
+	case "Failed":
+		log.Errorf("Clone job has failed for volume %s", destVolumeName)
+		return status.Error(codes.Internal,
+			fmt.Sprintf("Clone operation failed for volume %s", destVolumeName))
+	case "Suspended":
+		log.Warnf("Clone job is suspended for volume %s", destVolumeName)
+		return status.Error(codes.Aborted,
+			fmt.Sprintf("Clone operation is suspended for volume %s", destVolumeName))
+	default:
+		log.Warnf("Clone job has unknown status '%s' for volume %s", jobStatus, destVolumeName)
+		return status.Error(codes.Unknown,
+			fmt.Sprintf("Clone operation has unknown status '%s' for volume %s", jobStatus, destVolumeName))
+	}
 }

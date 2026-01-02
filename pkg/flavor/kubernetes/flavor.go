@@ -1100,3 +1100,96 @@ func (flavor *Flavor) UpdatePersistentVolume(pv *v1.PersistentVolume) error {
 	}
 	return nil
 }
+
+// CheckCloneJobStatus checks if a clone job exists and returns its status
+// Returns: (jobExists bool, jobStatus string, err error)
+// jobStatus can be: "Running", "Succeeded", "Failed", or "Unknown"
+func (flavor *Flavor) CheckCloneJobStatus(sourcePVCName, destPVCName, namespace string) (bool, string, error) {
+	jobName := fmt.Sprintf("clone-%s-to-%s", sourcePVCName, destPVCName)
+	log.Tracef(">>>>> CheckCloneJobStatus for job %s in namespace %s", jobName, namespace)
+	defer log.Tracef("<<<<< CheckCloneJobStatus")
+
+	// Get the job
+	job, err := flavor.kubeClient.BatchV1().Jobs(namespace).Get(context.Background(), jobName, meta_v1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			log.Tracef("Clone job %s not found in namespace %s", jobName, namespace)
+			return false, "", nil
+		}
+		log.Errorf("Failed to get clone job %s: %s", jobName, err.Error())
+		return false, "", fmt.Errorf("failed to get clone job %s: %w", jobName, err)
+	}
+
+	log.Infof("Found clone job %s in namespace %s", jobName, namespace)
+
+	// Check job status conditions
+	jobStatus := "Unknown"
+	for _, condition := range job.Status.Conditions {
+		if condition.Status == v1.ConditionTrue {
+			switch condition.Type {
+			case "Complete":
+				jobStatus = "Succeeded"
+				log.Infof("Clone job %s has completed successfully", jobName)
+			case "Failed":
+				jobStatus = "Failed"
+				log.Infof("Clone job %s has failed: %s", jobName, condition.Reason)
+			case "Suspended":
+				jobStatus = "Suspended"
+				log.Infof("Clone job %s is suspended", jobName)
+			}
+		}
+	}
+
+	// If no completion status, check if job is still running
+	if jobStatus == "Unknown" {
+		if job.Status.Active > 0 {
+			jobStatus = "Running"
+			log.Infof("Clone job %s is currently running with %d active pods", jobName, job.Status.Active)
+		} else if job.Status.Succeeded > 0 {
+			jobStatus = "Succeeded"
+			log.Infof("Clone job %s succeeded with %d pods", jobName, job.Status.Succeeded)
+		} else if job.Status.Failed > 0 {
+			jobStatus = "Failed"
+			log.Infof("Clone job %s failed with %d pods", jobName, job.Status.Failed)
+		}
+	}
+
+	// Log detailed job status
+	log.Tracef("Job %s status - Active: %d, Succeeded: %d, Failed: %d, Status: %s",
+		jobName, job.Status.Active, job.Status.Succeeded, job.Status.Failed, jobStatus)
+
+	return true, jobStatus, nil
+}
+
+// DeleteCloneJob deletes a clone job after it has completed
+// Parameters:
+//   - sourcePVCName: Source PVC name
+//   - destPVCName: Destination PVC name
+//   - namespace: Kubernetes namespace
+//
+// Returns: error if deletion fails
+func (flavor *Flavor) DeleteCloneJob(sourcePVCName, destPVCName, namespace string) error {
+	jobName := fmt.Sprintf("clone-%s-to-%s", sourcePVCName, destPVCName)
+	log.Tracef(">>>>> DeleteCloneJob for job %s in namespace %s", jobName, namespace)
+	defer log.Tracef("<<<<< DeleteCloneJob")
+
+	// Set propagation policy to delete dependent pods
+	propagationPolicy := meta_v1.DeletePropagationForeground
+	deleteOptions := meta_v1.DeleteOptions{
+		PropagationPolicy: &propagationPolicy,
+	}
+
+	// Delete the job
+	err := flavor.kubeClient.BatchV1().Jobs(namespace).Delete(context.Background(), jobName, deleteOptions)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			log.Infof("Clone job %s not found, already deleted", jobName)
+			return nil
+		}
+		log.Errorf("Failed to delete clone job %s: %s", jobName, err.Error())
+		return fmt.Errorf("failed to delete clone job %s: %w", jobName, err)
+	}
+
+	log.Infof("Successfully deleted clone job %s from namespace %s", jobName, namespace)
+	return nil
+}

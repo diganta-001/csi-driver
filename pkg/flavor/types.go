@@ -47,4 +47,6 @@ type Flavor interface {
 	CheckConnection() bool
 	GetPVCByName(name string, namespace string) (*v1.PersistentVolumeClaim, error)
 	HandleFileNodePublish(request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error)
+	CheckCloneJobStatus(sourcePVCName, destPVCName, namespace string) (bool, string, error)
+	DeleteCloneJob(sourcePVCName, destPVCName, namespace string) error
 }
