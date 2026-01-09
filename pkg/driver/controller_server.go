@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	v1 "k8s.io/api/core/v1"
 
 	log "github.com/hpe-storage/common-host-libs/logger"
 	"github.com/hpe-storage/common-host-libs/model"
@@ -246,6 +248,16 @@ func (driver *Driver) CreateVolume(ctx context.Context, request *csi.CreateVolum
 	// Update DB entry
 	if err := driver.UpdateDB(dbKey, volume); err != nil {
 		return nil, err
+	}
+
+	// Check if homefleet-clone key exists in volumeContext and add annotation to PV before binding
+	if _, hasCloneKey := volume.VolumeContext["homefleet-clone"]; hasCloneKey {
+		log.Infof("Volume %s has homefleet-clone key in volumeContext, adding annotation to PV before binding", volume.VolumeId)
+
+		// Add annotation synchronously to ensure it's set before PV binding
+		if err := driver.addHomeFleetCloneAnnotation(volume.VolumeId); err != nil {
+			log.Warnf("Failed to add homefleet-clone annotation to PV %s: %v", volume.VolumeId, err)
+		}
 	}
 
 	return &csi.CreateVolumeResponse{
@@ -2204,4 +2216,49 @@ func (driver *Driver) getOrGenerateHostIP(volumeID string, storageProvider stora
 	}
 
 	return hostIP
+}
+
+// addHomeFleetCloneAnnotation adds the homefleet-clone annotation to PV synchronously before binding.
+// This ensures the annotation is present before K8s binds the PV to PVC.
+func (driver *Driver) addHomeFleetCloneAnnotation(volumeID string) error {
+	log.Tracef(">>>>> addHomeFleetCloneAnnotation, volumeID: %s", volumeID)
+	defer log.Trace("<<<<< addHomeFleetCloneAnnotation")
+
+	// Wait for PV to be created by Kubernetes (max 30 seconds)
+	maxRetries := 60
+	retryInterval := 500 * time.Millisecond
+	var pv *v1.PersistentVolume
+	var err error
+
+	for i := 0; i < maxRetries; i++ {
+		pv, err = driver.flavor.GetVolumeById(volumeID)
+		if err == nil && pv != nil {
+			log.Infof("PV %s found after %d attempts, adding homefleet-clone annotation", volumeID, i+1)
+			break
+		}
+		time.Sleep(retryInterval)
+	}
+
+	if pv == nil {
+		return fmt.Errorf("PV %s not found after %d seconds", volumeID, maxRetries*int(retryInterval.Seconds()))
+	}
+
+	// Initialize annotations map if needed
+	if pv.ObjectMeta.Annotations == nil {
+		pv.ObjectMeta.Annotations = make(map[string]string)
+	}
+
+	// Add homefleet-clone annotation
+	pv.ObjectMeta.Annotations["homefleet-clone"] = "true"
+	log.Tracef("Adding annotation homefleet-clone=true to PV %s", volumeID)
+
+	// Update PV in Kubernetes
+	if k8sFlavor, ok := driver.flavor.(*kubernetes.Flavor); ok {
+		if err := k8sFlavor.UpdatePersistentVolume(pv); err != nil {
+			return fmt.Errorf("failed to update PV %s with homefleet-clone annotation: %v", volumeID, err)
+		}
+		log.Infof("Successfully added homefleet-clone annotation to PV %s BEFORE binding", volumeID)
+	}
+
+	return nil
 }

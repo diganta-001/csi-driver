@@ -26,6 +26,7 @@ import (
 	"github.com/hpe-storage/common-host-libs/model"
 	"github.com/hpe-storage/common-host-libs/stringformat"
 	"github.com/hpe-storage/common-host-libs/util"
+	"github.com/hpe-storage/csi-driver/pkg/flavor/kubernetes"
 	mountutil "k8s.io/mount-utils"
 	"k8s.io/utils/exec"
 
@@ -893,6 +894,41 @@ func (driver *Driver) NodePublishVolume(ctx context.Context, request *csi.NodePu
 			}
 			request.VolumeContext[key] = request.PublishContext[key]
 		}
+
+		// Check if this volume has homefleet-clone annotation in volumeContext
+		if _, hasCloneKey := request.VolumeContext["homefleet-clone"]; hasCloneKey {
+			log.Infof("Volume %s has homefleet-clone annotation in volumeContext, verifying pod label", request.VolumeId)
+
+			// Get pod information from volumeContext (when podInfoOnMount is enabled)
+			podName := request.VolumeContext[csiEphemeralPodName]
+			podNamespace := request.VolumeContext[csiEphemeralPodNamespace]
+
+			if podName == "" || podNamespace == "" {
+				return nil, status.Error(codes.FailedPrecondition, "pod information not available in volumeContext. Ensure podInfoOnMount is set to true in CSI driver deployment")
+			}
+
+			log.Infof("Checking pod %s/%s for homefleet-clone label", podNamespace, podName)
+
+			// Get pod labels if kubernetes flavor is available
+			if k8sFlavor, ok := driver.flavor.(*kubernetes.Flavor); ok {
+				podLabels, err := k8sFlavor.GetPodLabels(podName, podNamespace)
+				if err != nil {
+					log.Warnf("Failed to get pod labels for %s/%s: %v", podNamespace, podName, err)
+					return nil, status.Errorf(codes.Internal, "failed to get pod labels: %v", err)
+				}
+
+				// Check if pod has the homefleet-clone label
+				if cloneLabel, exists := podLabels["homefleet-clone"]; !exists || cloneLabel != "true" {
+					log.Warnf("Pod %s/%s does not have homefleet-clone label, clone operation still in progress", podNamespace, podName)
+					return nil, status.Error(codes.Unavailable, "clone operation is in progress, please wait for some time")
+				}
+
+				log.Infof("Pod %s/%s has homefleet-clone label, proceeding with file volume mount", podNamespace, podName)
+			} else {
+				return nil, status.Error(codes.Internal, "kubernetes flavor not available to verify pod labels")
+			}
+		}
+
 		return driver.flavor.HandleFileNodePublish(request)
 	}
 	// If ephemeral volume request, then create new volume, add ACL and NodeStage/NodePublish
@@ -2349,4 +2385,41 @@ func loadVolumeData(dir string, fileName string) (map[string]string, error) {
 	}
 	log.Tracef("Data file [%s] loaded successfully", dataFilePath)
 	return data, nil
+}
+
+// getPodLabel retrieves a specific label value from a pod using Kubernetes API
+// Returns the label value and true if found, empty string and false if not found
+func (driver *Driver) getPodLabel(podName, podNamespace, labelKey string) (string, bool) {
+	log.Tracef(">>>>> getPodLabel, podName: %s, podNamespace: %s, labelKey: %s", podName, podNamespace, labelKey)
+	defer log.Trace("<<<<< getPodLabel")
+
+	if podName == "" || podNamespace == "" || labelKey == "" {
+		return "", false
+	}
+
+	// Cast flavor to kubernetes.Flavor to access kubernetes-specific methods
+	k8sFlavor, ok := driver.flavor.(*kubernetes.Flavor)
+	if !ok {
+		log.Warn("Kubernetes flavor not available for getting pod labels")
+		return "", false
+	}
+
+	// Get pod labels using the new GetPodLabels method
+	podLabels, err := k8sFlavor.GetPodLabels(podName, podNamespace)
+	if err != nil {
+		log.Warnf("Failed to get pod labels for %s/%s: %v", podNamespace, podName, err)
+		return "", false
+	}
+
+	if podLabels == nil {
+		return "", false
+	}
+
+	// Check if the label exists
+	if labelValue, exists := podLabels[labelKey]; exists {
+		log.Tracef("Found label %s=%s on pod %s/%s", labelKey, labelValue, podNamespace, podName)
+		return labelValue, true
+	}
+
+	return "", false
 }
