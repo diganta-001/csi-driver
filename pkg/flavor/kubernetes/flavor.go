@@ -690,6 +690,23 @@ func (flavor *Flavor) getPodByName(name string, namespace string) (*v1.Pod, erro
 	return pod, nil
 }
 
+// GetPodLabels retrieves all labels from a pod
+func (flavor *Flavor) GetPodLabels(name string, namespace string) (map[string]string, error) {
+	log.Tracef(">>>>> GetPodLabels, name: %s, namespace: %s", name, namespace)
+	defer log.Trace("<<<<< GetPodLabels")
+
+	pod, err := flavor.getPodByName(name, namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	if pod == nil || pod.Labels == nil {
+		return make(map[string]string), nil
+	}
+
+	return pod.Labels, nil
+}
+
 // GetPVCByName to get the PVC details for given PVC name
 func (flavor *Flavor) GetPVCByName(name string, namespace string) (*v1.PersistentVolumeClaim, error) {
 	log.Tracef(">>>>> GetPVCByName, name: %s, namespace: %s", name, namespace)

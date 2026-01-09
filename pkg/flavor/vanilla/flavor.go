@@ -88,6 +88,13 @@ func (flavor *Flavor) IsPodExists(uid string) (bool, error) {
 	return false, nil
 }
 
+// GetPodLabels :
+//
+//nolint:revive
+func (flavor *Flavor) GetPodLabels(name string, namespace string) (map[string]string, error) {
+	return make(map[string]string), nil
+}
+
 //nolint:revive
 func (flavor *Flavor) CreateNFSVolume(pvName string, reqVolSize int64, parameters map[string]string, volumeContentSource *csi.VolumeContentSource) (nfsVolume *csi.Volume, rollback bool, err error) {
 	return nil, false, fmt.Errorf("NFS provisioned volume is not supported for non-k8s environments")
