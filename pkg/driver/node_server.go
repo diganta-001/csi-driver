@@ -427,8 +427,6 @@ func (driver *Driver) stageVolume(
 		volumeID, stagingMountPoint, volAccessType.String(), volCap, log.MapScrubber(publishContext), volumeContext)
 	defer log.Trace("<<<<< stageVolume")
 
-	var IsVolumeClone bool
-
 	// serialize stage requests
 	stageLock.Lock()
 	defer stageLock.Unlock()
@@ -519,41 +517,42 @@ func (driver *Driver) stageVolume(
 	// Store mount info in the staging device
 	stagingDevice.MountInfo = mountInfo
 
-	// Retrieve PVC spec for dataSource inspection for regular PVCs
+	// Only inspect persistent volumes for expansion during staging
 	if isEphemeral(volumeContext) == false {
-		pvc, err := driver.flavor.GetPVCByVolumeID(volumeID)
 
-		if err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("Error getting PVC from volumeID %v, %v", volumeID, err))
+		// Initialize resizeFs
+		r := mountutil.NewResizeFs(exec.New())
+
+		resizeDevicePath := device.AltFullPathName
+		// Resize path selection:
+		// - Encrypted (LUKS): use device.AltFullLuksPathName (enc-* mapper path).
+		// - Non-encrypted: use device.AltFullPathName.
+		// Example: /dev/mapper/enc-mpatha (LUKS) vs /dev/mapper/mpatha (non-LUKS).
+		if device.AltFullLuksPathName != "" {
+			resizeDevicePath = device.AltFullLuksPathName
 		}
 
-		// If the PVC DataSource is a VolumeSnapshot
-		if pvc != nil && pvc.Spec.DataSource != nil && pvc.Spec.DataSource.Kind == "VolumeSnapshot" {
-			log.Infof(" Datasource of volume %v is VolumeSnapshot and VolumeSnapshot Name: %s ", volumeID, pvc.Spec.DataSource.Name)
-			//set to true as volume is created from volume snapshot
-			IsVolumeClone = true
-		}
+		log.Infof("Verify whether resize required for device path %v ", resizeDevicePath)
 
-		// Check whether volume is created from snapshot then only we need resize
-		if IsVolumeClone {
-			// Initialize resizeFs
-			r := mountutil.NewResizeFs(exec.New())
-
-			log.Infof("Verify whether resize required for device path %v ", device.AltFullPathName)
-
+		// Verify device path is a valid block device before checking if resize is needed
+		// This prevents errors in test scenarios with fake devices and handles edge cases
+		isBlockDevice, err := driver.chapiDriver.IsBlockDevice(resizeDevicePath)
+		if err != nil || !isBlockDevice {
+			log.Warnf("Device path %s is not a valid block device (isBlock=%v, err=%v), skipping resize check", resizeDevicePath, isBlockDevice, err)
+		} else {
 			// check whether we need resize for file system
-			needResize, err := r.NeedResize(device.AltFullPathName, stagingMountPoint)
+			needResize, err := r.NeedResize(resizeDevicePath, stagingMountPoint)
 			if err != nil {
 				return nil, status.Errorf(codes.Internal, "Could not determine if volume %q need to be resized, error: %v", volumeID, err)
 			}
 			log.Infof("Need resize for filesystem: %v", needResize)
 
 			if needResize {
-				log.Infof("Resize of target path %s is required ", device.AltFullPathName)
-				if _, err := r.Resize(device.AltFullPathName, stagingMountPoint); err != nil {
+				log.Infof("Resize of target path %s is required ", resizeDevicePath)
+				if _, err := r.Resize(resizeDevicePath, stagingMountPoint); err != nil {
 					return nil, status.Errorf(codes.Internal, "Could not resize volume %q, error :  %v", volumeID, err)
 				}
-				log.Infof("Resize of target path %s is successful", device.AltFullPathName)
+				log.Infof("Resize of target path %s is successful", resizeDevicePath)
 			}
 		}
 	}
@@ -2036,6 +2035,15 @@ func (driver *Driver) NodeExpandVolume(ctx context.Context, request *csi.NodeExp
 	}
 
 	accessType := model.MountType
+	// Derive the accessProtocol from volume attributes of PV
+	accessProtocol := ""
+	if pv != nil && pv.Spec.CSI != nil && pv.Spec.CSI.VolumeAttributes != nil {
+		accessProtocol = pv.Spec.CSI.VolumeAttributes[accessProtocolKey]
+		log.Tracef("Volume attributes found in the persistent volume for volume ID: %s with accessProtocol %s", request.VolumeId, accessProtocol)
+	} else {
+		log.Warnf("Volume attributes not found in the persistent volume for volume ID: %s defaulting to iSCSI protocol", request.VolumeId)
+		accessProtocol = iscsi
+	}
 
 	// VolumeCapability is only available from CSI spec v1.2
 	if request.GetVolumeCapability() != nil {
@@ -2051,12 +2059,25 @@ func (driver *Driver) NodeExpandVolume(ctx context.Context, request *csi.NodeExp
 	var expandErr error
 	targetPath := ""
 	if accessType == model.BlockType {
-		// for raw block device volume-path is device path: i.e /dev/dm-1
-		targetPath = request.GetVolumePath()
-		// Expand device to underlying volume size
-		log.Infof("About to expand device %s with access type block to underlying volume size",
-			request.VolumePath)
-		expandErr = driver.chapiDriver.ExpandDevice(targetPath, model.BlockType)
+		// For block volumes, the volume path is the Kubernetes publish path (e.g., /var/lib/kubelet/plugins/.../volumeDevices/publish/...)
+		// which is a block device file created with mknod, not the actual multipath device.
+		// We must read the staging device info to get the real device path (e.g., /dev/mapper/mpathX)
+		stagedDevice, err := readStagedDeviceInfo(request.GetStagingTargetPath())
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument,
+				fmt.Sprintf("Cannot get staging device info for block volume expansion from staging path %s, Error: %s",
+					request.GetStagingTargetPath(), err.Error()))
+		}
+		if stagedDevice == nil || stagedDevice.Device == nil {
+			return nil, status.Error(codes.Internal,
+				fmt.Sprintf("Invalid staging device info found for block volume expansion. Staging device cannot be nil"))
+		}
+
+		// Use the actual device path from staging (e.g., /dev/mapper/mpathX)
+		targetPath = stagedDevice.Device.AltFullPathName
+		log.Infof("About to expand block device %s (resolved from staging path %s, volume path %s) to underlying volume size",
+			targetPath, request.GetStagingTargetPath(), request.VolumePath)
+		expandErr = driver.chapiDriver.ExpandDevice(targetPath, model.BlockType, accessProtocol)
 	} else {
 		// figure out if volumePath is actually a staging path
 		stagedDevice, err := readStagedDeviceInfo(request.GetVolumePath())
@@ -2083,7 +2104,7 @@ func (driver *Driver) NodeExpandVolume(ctx context.Context, request *csi.NodeExp
 		// Expand device to underlying volume size
 		log.Infof("About to expand device %s with access type mount to underlying volume size",
 			request.VolumePath)
-		expandErr = driver.chapiDriver.ExpandDevice(targetPath, model.MountType)
+		expandErr = driver.chapiDriver.ExpandDevice(targetPath, model.MountType, accessProtocol)
 	}
 
 	if expandErr != nil {

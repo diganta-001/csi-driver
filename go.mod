@@ -1,18 +1,17 @@
 module github.com/hpe-storage/csi-driver
 
-go 1.24.0
-
-toolchain go1.24.4
+go 1.25.7
 
 require (
 	github.com/Scalingo/go-etcd-lock/v5 v5.0.8
 	github.com/container-storage-interface/spec v1.9.0
 	github.com/golang/protobuf v1.5.4
-	github.com/hpe-storage/common-host-libs v0.0.0-20260116045805-d9634fa6522f
+	github.com/hpe-storage/common-host-libs v0.0.0-20260223141311-ce039ce4c5d6
 	github.com/hpe-storage/k8s-custom-resources v0.0.0-20260119040638-398cb5cb0d42
 	github.com/kubernetes-csi/csi-lib-utils v0.11.0
 	github.com/kubernetes-csi/csi-test v2.2.0+incompatible
 	github.com/kubernetes-csi/external-snapshotter/client/v6 v6.1.0
+	github.com/satori/go.uuid v1.2.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/mod v0.29.0
@@ -68,7 +67,6 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	github.com/satori/go.uuid v1.2.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/sparrc/go-ping v0.0.0-20190613174326-4e5b6552494c // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
