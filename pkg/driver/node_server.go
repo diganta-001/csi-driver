@@ -908,7 +908,7 @@ func (driver *Driver) NodePublishVolume(ctx context.Context, request *csi.NodePu
 			request.VolumeContext[key] = request.PublishContext[key]
 		}
 
-		if request.Secrets != nil && request.Secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+		if request.PublishContext != nil && request.PublishContext[nfsServiceProviderKey] == x10000FileSupportValue {
 			if _, hasCloneKey := request.VolumeContext[homeFleetNFSCSPServiceName]; hasCloneKey {
 				// Validate homefleet-clone access before allowing mount
 				if err := driver.validateHomeFleetCloneAccess(request.VolumeId, request.VolumeContext); err != nil {

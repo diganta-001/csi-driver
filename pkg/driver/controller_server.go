@@ -441,7 +441,8 @@ func (driver *Driver) createVolume(
 		// Check if the existing volume's size matches with the requested size
 		// TODO: Nimble doesn't support capacity range, but other SP might.
 		// We may consider adding range support in the future???
-		if existingVolume.Size != size && (secrets != nil && secrets[serviceNameKey] != homeFleetNFSCSPServiceName) {
+		// below condition is needed as HF doesn't return the volume size in GetVolumeByName response and we should allow volume creation to proceed if the existing volume is provisioned by HF NFS CSP
+		if existingVolume.Size != size && (createParameters != nil && createParameters[nfsServiceProviderKey] != x10000FileSupportValue) {
 			log.Errorf("Volume already exists with size %v but different size %v being requested.",
 				existingVolume.Size, size)
 			return nil, status.Error(
@@ -455,7 +456,7 @@ func (driver *Driver) createVolume(
 			return nil, status.Error(codes.Unavailable, fmt.Sprintf("Background operation for volume is not complete: %s", err.Error()))
 		}
 		// For HomeFleet NFS CSP, update the size of existing volume to requested size as HomeFleet doesn't return the volume size
-		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+		if createParameters != nil && createParameters[nfsServiceProviderKey] == x10000FileSupportValue {
 			existingVolume.Size = size
 		}
 		// Applicable only if the existing volume has completed its background operation successfully
@@ -725,8 +726,19 @@ func (driver *Driver) deleteVolume(volumeID string, secrets map[string]string, f
 			fmt.Sprintf("Failed to get storage provider from secrets, err: %s", err.Error()))
 	}
 
+	// Read PV volume attributes to determine service type
+	svcValue := ""
+	pv, err := driver.flavor.GetVolumeById(volumeID)
+	if err != nil {
+		log.Warnf("Failed to get PV %s, err: %s", volumeID, err.Error())
+	} else if pv != nil && pv.Spec.CSI != nil && pv.Spec.CSI.VolumeAttributes != nil {
+		if svc, ok := pv.Spec.CSI.VolumeAttributes[nfsServiceProviderKey]; ok {
+			svcValue = svc
+		}
+	}
+
 	// Get volume snapshots
-	if IsSnapshotSupportedByCSP(secrets[serviceNameKey]) {
+	if IsSnapshotSupportedByCSP(svcValue) {
 		snapshots, err := storageProvider.GetSnapshots(volumeID)
 		if err != nil {
 			log.Error("Error fetching snapshots for volume:", volumeID, ", error: ", err.Error())
@@ -736,7 +748,7 @@ func (driver *Driver) deleteVolume(volumeID string, secrets map[string]string, f
 		// check if snapshots exist
 		if len(snapshots) > 0 {
 			log.Tracef("Found snapshots for volume %s: %+v", volumeID, snapshots)
-			return status.Errorf(codes.FailedPrecondition, fmt.Sprintf("Volume %s with ID %s cannot be deleted as it has snapshots attached", existingVolume.Name, existingVolume.ID))
+			return status.Error(codes.FailedPrecondition, fmt.Sprintf("Volume %s with ID %s cannot be deleted as it has snapshots attached", existingVolume.Name, existingVolume.ID))
 		}
 	}
 	// Delete the volume from the array
@@ -747,8 +759,8 @@ func (driver *Driver) deleteVolume(volumeID string, secrets map[string]string, f
 			fmt.Sprintf("Error while deleting volume %s, err: %s", existingVolume.Name, err.Error()))
 	}
 
-	// Cleanup volume-specific mutex for file volumes to prevent memory leaks
-	if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+	// Cleanup volume-specific mutex only for homeFleet NFS service volumes to prevent memory leaks
+	if svcValue == x10000FileSupportValue {
 		driver.pvMutexManager.CleanupVolumeMutex(volumeID)
 	}
 
@@ -877,7 +889,7 @@ func (driver *Driver) controllerPublishVolume(
 	if driver.IsFileRequest(volumeContext) {
 		hostIP, mountPath, accessIP := "", "", "" //needed to mount the file volume on the node
 
-		if secrets != nil && secrets[serviceNameKey] == alletraStorageNFSCSPServiceName {
+		if volumeContext != nil && volumeContext[nfsServiceProviderKey] == "" {
 			// Get storageProvider using secrets
 			storageProvider, err := driver.GetStorageProvider(secrets)
 			if err != nil {
@@ -904,7 +916,7 @@ func (driver *Driver) controllerPublishVolume(
 
 			hostIP = configValues[fileHostIPKey]
 			mountPath = configValues[mountPathKey]
-		} else if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+		} else if volumeContext != nil && volumeContext[nfsServiceProviderKey] == x10000FileSupportValue {
 
 			// Logic below gets access IP from node networks and can become common for all NFS CSPs TODO
 			if volumeContext[accessIPKey] != "" {
@@ -968,10 +980,11 @@ func (driver *Driver) controllerPublishVolume(
 
 		log.Info("ControllerPublish requested with file resources, returning success")
 		return map[string]string{
-			readOnlyKey:        strconv.FormatBool(readOnlyAccessMode),
-			nfsMountOptionsKey: volumeContext[nfsMountOptionsKey],
-			fileHostIPKey:      hostIP,
-			mountPathKey:       mountPath,
+			readOnlyKey:           strconv.FormatBool(readOnlyAccessMode),
+			nfsMountOptionsKey:    volumeContext[nfsMountOptionsKey],
+			fileHostIPKey:         hostIP,
+			mountPathKey:          mountPath,
+			nfsServiceProviderKey: volumeContext[nfsServiceProviderKey],
 		}, nil
 	}
 
@@ -1206,10 +1219,16 @@ func (driver *Driver) controllerUnpublishVolume(volumeID string, nodeID string, 
 		log.Info("ControllerUnpublish requested for File with multi-node access-mode, returning success")
 		return nil
 	}
-	// this condition is for homefleet nfs csp
-	if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
-		// Remove PV nodeID mapping and unpublish file volume
-		if secrets != nil && secrets[serviceNameKey] == homeFleetNFSCSPServiceName {
+
+	// Read PV volume attributes to check service type
+	pv, err := driver.flavor.GetVolumeById(volumeID)
+	if err != nil {
+		log.Warnf("Failed to get PV %s, err: %s", volumeID, err.Error())
+	}
+
+	// Cleanup volume-specific mutex only for homeFleet NFS service volumes to prevent memory leaks
+	if pv != nil && pv.Spec.CSI != nil && pv.Spec.CSI.VolumeAttributes != nil {
+		if svcValue, ok := pv.Spec.CSI.VolumeAttributes[nfsServiceProviderKey]; ok && svcValue == x10000FileSupportValue {
 			// Get accessIP from PV before removing the mapping
 			accessIP, err := driver.getAccessIPFromPV(volumeID, nodeID)
 			if err != nil {
@@ -1228,11 +1247,12 @@ func (driver *Driver) controllerUnpublishVolume(volumeID string, nodeID string, 
 			}
 			// Remove the PV annotation mapping
 			driver.removePVNodeIDMapping(volumeID, nodeID)
-		}
-		log.Info("ControllerUnpublish requested for File with multi-node access-mode, returning success")
-		return nil
-	}
 
+			log.Info("ControllerUnpublish requested for File with multi-node access-mode, returning success")
+			return nil
+		}
+
+	}
 	// pass the nodeID to the container storage provider and do not do a look up of the node object as
 	// node object may have been deleted as part of UnloadNodeInfo when the node went down
 	if !existingVolume.Published {
