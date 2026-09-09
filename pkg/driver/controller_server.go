@@ -569,6 +569,23 @@ func (driver *Driver) createVolume(
 				}
 			}
 
+			// CON-4719: allow a per-restore override of the source snapshot's stored
+			// useVirtualCopies decision, read live off the VolumeSnapshot's own annotation.
+			// The owning VolumeSnapshot's identity comes from CSP's GetSnapshot response
+			// (existingSnap), captured once at CreateSnapshot time - not from this request,
+			// which carries only the backend snapshot ID.
+			vsNamespace, _ := existingSnap.Config["VolumeSnapshotNamespace"].(string)
+			vsName, _ := existingSnap.Config["VolumeSnapshotName"].(string)
+			if vsNamespace != "" && vsName != "" {
+				val, ok, err := driver.flavor.GetVolumeSnapshotAnnotation(vsNamespace, vsName, useVirtualCopiesAnnotationKey)
+				if err != nil {
+					log.Warnf("Failed to read %s annotation from VolumeSnapshot %s/%s, falling back to stored decision: %s",
+						useVirtualCopiesAnnotationKey, vsNamespace, vsName, err.Error())
+				} else if ok {
+					createOptions[useVirtualCopiesOptionKey] = val
+				}
+			}
+
 			// Create a clone from another volume
 			log.Infof("About to create a new clone '%s' from snapshot %s with options %+v", name, existingSnap.ID, createOptions)
 			volume, err := storageProvider.CloneVolume(name, description, "", existingSnap.ID, size, createOptions)
@@ -736,7 +753,7 @@ func (driver *Driver) deleteVolume(volumeID string, secrets map[string]string, f
 	}
 
 	// Get volume snapshots. Pass the "exists" mode (CON-4709, common-host-libs) since DeleteVolume
-	// only needs to know whether any snapshot is present, not the full snapshot list 
+	// only needs to know whether any snapshot is present, not the full snapshot list
 	const snapshotModeExists = "exists"
 	snapshots, err := storageProvider.GetSnapshots(volumeID, snapshotModeExists)
 	if err != nil {
@@ -1430,6 +1447,18 @@ func (driver *Driver) CreateSnapshot(ctx context.Context, request *csi.CreateSna
 		createOptions[util.ToSnakeCase(k)] = v
 	}
 	log.Trace("Snapshot create options: ", createOptions)
+
+	// CON-4719: forward the owning VolumeSnapshot's identity (injected by csi-snapshotter's
+	// --extra-create-metadata) to CSP under clean field names, so it can be persisted on the
+	// snapshot's CRD and read back by the driver at restore time via GetSnapshot.
+	if val, ok := createOptions[volumeSnapshotNameKey]; ok {
+		createOptions[volumeSnapshotNameOptionKey] = val
+		delete(createOptions, volumeSnapshotNameKey)
+	}
+	if val, ok := createOptions[volumeSnapshotNamespaceKey]; ok {
+		createOptions[volumeSnapshotNamespaceOptionKey] = val
+		delete(createOptions, volumeSnapshotNamespaceKey)
+	}
 
 	// extract the description if present
 	var description string

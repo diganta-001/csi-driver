@@ -38,6 +38,9 @@ type Flavor interface {
 	IsNFSVolume(volumeID string) bool
 	GetVolumePropertyOfPV(propertyName string, pvName string) (string, error)
 	GetVolumeById(volumeId string) (*v1.PersistentVolume, error)
+	// GetVolumeSnapshotAnnotation reads a single annotation off the live VolumeSnapshot object.
+	// Returns ok=false when the annotation is absent (not an error).
+	GetVolumeSnapshotAnnotation(namespace, name, key string) (value string, ok bool, err error)
 	GetNFSVolumeID(volumeID string) (string, error)
 	ExpandNFSBackendVolume(nfsVolumeID string, newCapacity int64) error
 	GetOrchestratorVersion() (*version.Info, error)

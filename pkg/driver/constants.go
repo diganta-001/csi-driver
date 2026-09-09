@@ -122,6 +122,17 @@ const (
 	nfsSourceNamespaceKey = "csi.storage.k8s.io/pvc/namespace"
 	defaultNFSNamespace   = "hpe-nfs"
 
+	// Injected by external-provisioner's --extra-create-metadata when restoring from a VolumeSnapshot.
+	volumeSnapshotNameKey      = "csi.storage.k8s.io/volumesnapshot/name"
+	volumeSnapshotNamespaceKey = "csi.storage.k8s.io/volumesnapshot/namespace"
+	// Clean field names forwarded to CSP for the same values (set by csi-snapshotter's
+	// own --extra-create-metadata at CreateSnapshot time, not by csi-provisioner).
+	volumeSnapshotNameOptionKey      = "volume_snapshot_name"
+	volumeSnapshotNamespaceOptionKey = "volume_snapshot_namespace"
+	// CON-4719: per-restore override of the source snapshot's stored copy-type decision.
+	useVirtualCopiesAnnotationKey = "csi.hpe.com/useVirtualCopies"
+	useVirtualCopiesOptionKey     = "use_virtual_copies"
+
 	// Maximum default number of volumes that controller can publish to the node.
 	defaultMaxVolPerNode = 100
 	maxVolumesPerNodeKey = "MAX_VOLUMES_PER_NODE"
@@ -131,9 +142,9 @@ const (
 	fsRepairKey = "fsRepair"
 
 	// File volume constants
-	fileExportIPKey      = "exportIP"
-	mountPathKey         = "mountPath"
-	fileVolumeNameKey    = "csi.storage.k8s.io/pv/name"
-	accessControlListKey = "accessControlList"
+	fileExportIPKey                = "exportIP"
+	mountPathKey                   = "mountPath"
+	fileVolumeNameKey              = "csi.storage.k8s.io/pv/name"
+	accessControlListKey           = "accessControlList"
 	accessControlListAnnotationKey = "csi.hpe.com/accessControlList"
 )

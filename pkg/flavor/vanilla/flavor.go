@@ -127,6 +127,11 @@ func (flavor *Flavor) GetVolumePropertyOfPV(propertyName string, pvName string) 
 	return "", nil
 }
 
+//nolint:revive
+func (flavor *Flavor) GetVolumeSnapshotAnnotation(namespace, name, key string) (string, bool, error) {
+	return "", false, nil
+}
+
 func (flavor *Flavor) GetVolumeById(volumeId string) (*v1.PersistentVolume, error) {
 	return nil, nil
 }
